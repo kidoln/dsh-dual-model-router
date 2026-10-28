@@ -1,0 +1,17 @@
+# dsh-dual-model-router — dual-model auto routing.
+# enabled=false by default; switch it on on the plugin's Settings page.
+- insert:
+    - id: dual-model-router
+      name: dsh-dual-model-router
+      config:
+        enabled: false
+        primary:
+          provider: zai-coding-cn
+          model: glm-5.3
+        aux:
+          provider: giends4f-remote
+          model: DeepSeek-V4-Flash
+        classifierTimeoutMs: 15000
+        plannerGuidance: true
+        complexKeywords:
+          - hard

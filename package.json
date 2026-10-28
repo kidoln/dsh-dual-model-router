@@ -1,0 +1,42 @@
+{
+  "name": "dsh-dual-model-router",
+  "version": "0.6.1",
+  "private": true,
+  "type": "module",
+  "description": "Dual-model auto router for DeepSeek Harness: a fast auxiliary model classifies each task in the context of the conversation and handles simple ones; complex tasks are planned by the strong primary model and executed by auxiliary-model subagents.",
+  "license": "MIT",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "lib/classifier.js",
+    "lib/routing.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/en.json",
+    "locale/zh.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-shortcuts",
+        "@deepseek-ai/dsh-client-ui-model-selection"
+      ],
+      "platform": "web"
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+	"meta": {
+		"title": "Dual-Model Router",
+		"description": "Classifies each task in the context of the conversation with the fast auxiliary model; simple tasks run on it directly, complex tasks are planned by the strong primary model and executed by auxiliary-model subagents."
+	}
+}
