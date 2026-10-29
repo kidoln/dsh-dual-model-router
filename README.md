@@ -121,8 +121,11 @@ Two surfaces sit in the composer tool row, under the input box:
   shortcut, settings page, another tab — shows up here.
 - **Model seat** (`conversation.input.model`): **while the router is on, the
   plugin shadows the shipped model selector** with a read-only display of the
-  model this conversation actually runs on. The bare model name is the normal
-  case — every route is router-chosen, so no badge is shown. A `手动` badge
+  model this conversation actually runs on. The label is the model catalog's
+  display name, resolved from the same per-session directory the shipped
+  selector reads, so it matches the name in the `/model` menu; a route the
+  catalog does not know yet falls back to the provider-owned id. The bare model
+  name is the normal case — every route is router-chosen, so no badge is shown. A `手动` badge
   appears only when a pick made through the `/model` command has deferred the
   router for this conversation. Manual selection in the composer is therefore
   impossible while the router is on; turning the router off restores the

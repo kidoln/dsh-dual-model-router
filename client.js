@@ -441,6 +441,45 @@ window.__ModuleLoader__.load({
 			return value;
 		};
 
+		/** No catalog read yet; one stable array so a subscriber never sees a fresh identity. */
+		const EMPTY_GROUPS = [];
+
+		/**
+		 * The session catalog's provider groups, read from the same directory
+		 * store the shipped selector builds. Used only to turn a provider-owned
+		 * model id into the name the selector itself would print: an unavailable
+		 * catalog just leaves the id as the label.
+		 */
+		const groupsCache = new WeakMap();
+		const groupsOf = (store) => {
+			if (store === null || typeof store !== 'object') return EMPTY_GROUPS;
+			let snapshot = null;
+			try {
+				snapshot = store.getSnapshot?.() ?? null;
+			} catch {
+				snapshot = null;
+			}
+			const groups = Array.isArray(snapshot?.groups) ? snapshot.groups : EMPTY_GROUPS;
+			// Compare the ARRAY, not the snapshot: the store hands back the same
+			// groups reference across unrelated updates, while a fresh identity on
+			// every read would make uSES loop instead of render.
+			if (groupsCache.get(store) === groups) return groups;
+			groupsCache.set(store, groups);
+			return groups;
+		};
+
+		/** The catalog's display name for one route, falling back to its id. */
+		const modelLabelOf = (groups, provider, model) => {
+			if (typeof model !== 'string' || model.length === 0) return '';
+			for (const group of groups) {
+				if (provider !== undefined && provider !== '' && group?.id !== provider) continue;
+				for (const entry of group?.models ?? []) {
+					if (entry?.id === model) return entry.name ?? model;
+				}
+			}
+			return model;
+		};
+
 		/** Read the applied config without waiting for a conversation (JSON snapshot). */
 		async function refreshRouterState() {
 			try {
@@ -528,6 +567,17 @@ window.__ModuleLoader__.load({
 				() => () => (store === undefined ? null : selectionOf(store)),
 				[store],
 			);
+			return useSyncStore(subscribe, getSnapshot);
+		}
+
+		/** The conversation's model catalog groups (empty until the catalog loads). */
+		function useSessionGroups(sessionId) {
+			const store = directoryStoreOf(sessionId);
+			const subscribe = _react.useMemo(
+				() => (store === undefined || typeof store.subscribe !== 'function' ? NOOP_SUBSCRIBE : (listener) => store.subscribe(listener)),
+				[store],
+			);
+			const getSnapshot = _react.useMemo(() => () => groupsOf(store), [store]);
 			return useSyncStore(subscribe, getSnapshot);
 		}
 
@@ -646,6 +696,7 @@ window.__ModuleLoader__.load({
 			const sessionId = useSessionId(sessionIdProp, nodeRef);
 			const session = useSessionState(sessionId);
 			const selection = useSessionSelection(sessionId);
+			const groups = useSessionGroups(sessionId);
 			const route = currentRouteOf(session, selection);
 
 			const ref = (node) => { nodeRef.current = node; };
@@ -656,9 +707,12 @@ window.__ModuleLoader__.load({
 				}, h('span', null, '…'));
 			}
 
+			// the shipped selector prints the catalog's display name; the router
+			// must too, or the seat shows a raw model id the user never picked
+			const modelLabel = modelLabelOf(groups, route.provider, route.model);
 			const mode = route.mode === 'complex' ? t.modeComplex : t.modeSimple;
 			const title = (route.manual ? t.seatManualTitle : t.seatAutoTitle)
-				.replace('{model}', route.provider.length > 0 ? `${route.provider}/${route.model}` : route.model)
+				.replace('{model}', route.provider.length > 0 ? `${route.provider}/${modelLabel}` : modelLabel)
 				.replace('{mode}', mode);
 
 			return h('span', {
@@ -683,7 +737,7 @@ window.__ModuleLoader__.load({
 					})),
 				h('span', {
 					style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--dsw-alias-label-primary, inherit)' },
-				}, route.model),
+				}, modelLabel),
 				// while the router drives the seat every model is router-chosen, so
 				// a chip would carry no information — only a manual pick is news
 				route.manual ? h('span', {
@@ -703,13 +757,15 @@ window.__ModuleLoader__.load({
 			const nodeRef = _react.useRef(null);
 			const sessionId = useSessionId(sessionIdProp, nodeRef);
 			const session = useSessionState(sessionId);
+			const groups = useSessionGroups(sessionId);
 			const globalEnabled = useSyncStore(subscribeRouterEnabled, snapshotRouterEnabled);
 			const enabled = globalEnabled === undefined ? session.enabled : globalEnabled;
 			const status = session.status;
 
 			if (enabled !== true || status === null || status === undefined) return null;
 
-			const model = status.route?.model ?? '';
+			// the catalog's display name, not the raw provider-owned id
+			const model = modelLabelOf(groups, status.route?.provider ?? '', status.route?.model ?? '');
 			// `kind` is the protocol value the host emits ('auto'), while the
 			// palette is keyed by the surface it describes: an auto route must be
 			// tinted by its mode, not fall through to the neutral manual dot.

@@ -538,18 +538,92 @@ test('the model seat re-reads a session directory the host replaced', async () =
 	const [seat] = optionsOf(harness.registrations, 'conversation.input.model');
 	assert.ok(seat, 'the seat is installed while the router is on');
 	hooks.render(seat.component, { sessionId: 'session-1' });
-	assert.deepEqual(reads, ['session-1'], 'the directory service is consulted on render');
+	// one read for the durable selection, one for the catalog groups that name it
+	assert.deepEqual(reads, ['session-1', 'session-1'], 'the directory service is consulted on render');
 
 	// the host disposes the session binding and re-creates it: a memoized store
 	// would now be a dead object and the seat would freeze on a stale selection
 	directories.set('session-1', { store: { getSnapshot: () => ({ current: { provider: 'p', model: 'aux-m-2' } }) } });
 	hooks.render(seat.component, { sessionId: 'session-1' });
-	assert.deepEqual(reads, ['session-1', 'session-1'], 'a replaced directory must be re-resolved, never served from a cache');
+	assert.deepEqual(
+		reads,
+		['session-1', 'session-1', 'session-1', 'session-1'],
+		'a replaced directory must be re-resolved, never served from a cache',
+	);
 
 	// a directory that disappears again (session teardown) must not throw
 	directories.delete('session-1');
 	assert.doesNotThrow(() => hooks.render(seat.component, { sessionId: 'session-1' }));
 	harness.dispose();
+});
+
+test('the seat and the routing detail print the catalog display name, not the model id', async () => {
+	const hooks = hookRuntime();
+	const client = loadClient({ react: hooks.react });
+	// the shape the shipped selector reads: provider groups whose models carry
+	// both the provider-owned id and the name the menu shows
+	const groups = [
+		{ id: 'strong-p', name: 'Strong', models: [{ id: 'strong-m', name: 'Strong Model' }] },
+		{ id: 'fast-p', name: 'Fast', models: [{ id: 'fast-m', name: 'Fast Model' }] },
+	];
+	const modelDirectories = {
+		directoryFor() {
+			return { store: { getSnapshot: () => ({ current: null, groups }), subscribe: () => () => {} } };
+		},
+	};
+	const harness = fakeContext({ modelDirectories });
+	const streams = [];
+	const realEventSource = globalThis.EventSource;
+	globalThis.EventSource = class {
+		constructor(url) {
+			this.url = String(url);
+			streams.push(this);
+		}
+		close() {}
+	};
+	try {
+		await withFetch(() => ({ ok: true, json: async () => ({ enabled: true }) }), async () => {
+			client.apply(harness.ctx);
+			await settle();
+		});
+
+		const [seat] = optionsOf(harness.registrations, 'conversation.input.model');
+		const [dock] = optionsOf(harness.registrations, 'conversation.composer.dock');
+		assert.ok(seat, 'the seat is installed while the router is on');
+		assert.ok(dock, 'the routing detail surface is installed');
+		// rendering subscribes both surfaces, which opens the session's stream
+		hooks.render(seat.component, { sessionId: 'session-1' });
+		hooks.render(dock.component, { sessionId: 'session-1' });
+		const stream = streams.find((entry) => entry.url.includes('session-1'));
+		assert.ok(stream, 'the surfaces open one status stream for their session');
+
+		stream.onmessage({
+			data: JSON.stringify({
+				type: 'init',
+				enabled: true,
+				primary: { provider: 'strong-p', model: 'strong-m' },
+				aux: { provider: 'fast-p', model: 'fast-m' },
+				status: { kind: 'auto', mode: 'simple', route: { provider: 'fast-p', model: 'fast-m' } },
+			}),
+		});
+
+		const seatText = textOf(hooks.render(seat.component, { sessionId: 'session-1' })).join(' ');
+		assert.match(seatText, /Fast Model/, 'the seat shows the catalog name');
+		assert.doesNotMatch(seatText, /fast-m/, 'the raw model id is not the seat label');
+
+		const dockText = textOf(hooks.render(dock.component, { sessionId: 'session-1' })).join(' ');
+		assert.match(dockText, /Fast Model/, 'the routing detail shows the catalog name');
+		assert.doesNotMatch(dockText, /fast-m/, 'the raw model id is not the routing detail label');
+
+		// a catalog that does not know the routed model (e.g. not loaded yet, or a
+		// provider that vanished) must still render something recognisable
+		groups.length = 0;
+		const fallbackText = textOf(hooks.render(dock.component, { sessionId: 'session-1' })).join(' ');
+		assert.match(fallbackText, /fast-m/, 'an unknown model falls back to its id');
+	} finally {
+		globalThis.EventSource = realEventSource;
+		harness.dispose();
+	}
 });
 
 test('the routing dot is tinted by the auto mode, not the neutral fallback', async () => {
