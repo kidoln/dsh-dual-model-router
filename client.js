@@ -57,7 +57,7 @@ window.__ModuleLoader__.load({
 			loading: 'Loading…',
 			loadFailed: 'Could not read the plugin configuration.',
 			hintTitle: 'How it works',
-			hintBody: 'Every new message is first classified by the auxiliary model. Simple tasks run entirely on the auxiliary model; complex tasks are planned by the primary model, which delegates execution steps to subagents running on the auxiliary model. While this is on, the composer\'s model control is locked and shows the model the router is using; a model you pick yourself through the /model command still wins.',
+			hintBody: 'Every new message is first classified by the auxiliary model. Simple tasks run entirely on the auxiliary model; complex tasks are planned by the primary model, which delegates execution steps to subagents running on the auxiliary model. While this is on, the composer\'s model control is locked and shows the model the router is using, and any model you pick yourself through the /model command is taken over at the next step: the switch below is the only way to drive a conversation with a model of your own.',
 			unconfigured: 'Pick both models before enabling.',
 			notSet: '(not configured)',
 			shortcutLabel: 'Toggle shortcut',
@@ -86,7 +86,7 @@ window.__ModuleLoader__.load({
 			loading: '加载中…',
 			loadFailed: '读取插件配置失败。',
 			hintTitle: '工作方式',
-			hintBody: '每条新消息先由辅助模型判别难度：简单任务全程走辅助模型；复杂任务由主模型规划，并把执行步骤委派给运行在辅助模型上的子智能体。开启后输入框下方的模型控件被锁定，只显示路由当前使用的模型；你通过 /model 手动选择的模型仍然优先。',
+			hintBody: '每条新消息先由辅助模型判别难度：简单任务全程走辅助模型；复杂任务由主模型规划，并把执行步骤委派给运行在辅助模型上的子智能体。开启后输入框下方的模型控件被锁定，只显示路由当前使用的模型；会话中通过 /model 选择的模型会在下一步被自动路由接管，关闭自动路由才能用自己的模型驱动本对话。',
 			unconfigured: '启用前请先选择两个模型。',
 			notSet: '（未配置）',
 			shortcutLabel: '开关快捷键',
@@ -104,9 +104,7 @@ window.__ModuleLoader__.load({
 			pillOnTitleNoKeys: 'Dual-model routing is ON. Click to switch it off.',
 			pillOffTitleNoKeys: 'Dual-model routing is OFF. Click to switch it on.',
 			pillFailed: 'Could not switch dual-model routing: {error}',
-			seatManual: 'manual',
-			seatAutoTitle: 'Dual-model routing is driving this conversation: the current request uses {model} ({mode} task). The composer model control follows the router; switch the router off to choose a model yourself.',
-			seatManualTitle: 'Dual-model routing is on, but this conversation uses the model you selected manually: {model}.',
+			seatAutoTitle: 'Dual-model routing is driving this conversation: the current request uses {model} ({mode} task). The composer model control follows the router, and a model picked through /model is taken over too; switch the router off to choose a model yourself.',
 			modeComplex: 'complex',
 			modeSimple: 'simple',
 		};
@@ -119,9 +117,7 @@ window.__ModuleLoader__.load({
 			pillOnTitleNoKeys: '双模型路由已开启。点击关闭。',
 			pillOffTitleNoKeys: '双模型路由已关闭。点击开启。',
 			pillFailed: '切换双模型路由失败：{error}',
-			seatManual: '手动',
-			seatAutoTitle: '双模型路由正在驱动本对话：当前请求使用 {model}（{mode}任务）。此处模型控件由路由接管，关闭路由后即可自行选择模型。',
-			seatManualTitle: '双模型路由已开启，但本对话使用的是你手动选择的模型：{model}。',
+			seatAutoTitle: '双模型路由正在驱动本对话：当前请求使用 {model}（{mode}任务）。此处模型控件由路由接管，/model 选择的模型同样会被接管；关闭路由后即可自行选择模型。',
 			modeComplex: '复杂',
 			modeSimple: '简单',
 		};
@@ -131,7 +127,6 @@ window.__ModuleLoader__.load({
 			autoSimple: (model) => `simple task · auxiliary model ${model}`,
 			autoComplex: (model) => `complex task · primary model ${model} plans, auxiliary executes`,
 			subagent: (model) => `subagent · auxiliary model ${model}`,
-			manual: (model) => `manual model ${model} · auto routing deferred`,
 		};
 
 		const ZH_INDICATOR = {
@@ -139,7 +134,6 @@ window.__ModuleLoader__.load({
 			autoSimple: (model) => `简单任务 · 辅助模型 ${model}`,
 			autoComplex: (model) => `复杂任务 · 主模型 ${model} 规划，辅助模型执行`,
 			subagent: (model) => `子代理 · 辅助模型 ${model}`,
-			manual: (model) => `手动模型 ${model} · 自动路由未接管`,
 		};
 
 		const DOT_COLORS = {
@@ -147,8 +141,9 @@ window.__ModuleLoader__.load({
 			autoSimple: 'var(--dsw-alias-state-success-primary, #2e9e5b)',
 			autoComplex: 'var(--dsw-alias-brand-primary, #4176e6)',
 			subagent: 'var(--dsw-alias-state-success-primary, #2e9e5b)',
-			manual: 'var(--dsw-alias-state-idle-primary, #999)',
 		};
+		/** A kind with no tint of its own stays neutral instead of guessing. */
+		const NEUTRAL_DOT = 'var(--dsw-alias-state-idle-primary, #999)';
 
 		const isZh = () => {
 			const lang = document.documentElement.lang || navigator.language || '';
@@ -173,7 +168,6 @@ window.__ModuleLoader__.load({
 		const NOOP_SUBSCRIBE = () => () => {};
 
 		const routeKey = (route) => (route && route.provider && route.model ? `${route.provider}::${route.model}` : '');
-		const sameRoute = (a, b) => Boolean(a && b && a.provider === b.provider && a.model === b.model);
 
 		/** Nothing known about this conversation yet. */
 		const EMPTY_SESSION = Object.freeze({
@@ -181,7 +175,6 @@ window.__ModuleLoader__.load({
 			enabled: undefined,
 			primary: null,
 			aux: null,
-			defaultSelection: null,
 			status: null,
 		});
 
@@ -226,7 +219,6 @@ window.__ModuleLoader__.load({
 						enabled: frame.enabled === true,
 						primary: frame.primary ?? null,
 						aux: frame.aux ?? null,
-						defaultSelection: frame.defaultSelection ?? null,
 						status: frame.status ?? null,
 					});
 					return;
@@ -374,10 +366,9 @@ window.__ModuleLoader__.load({
 			return keys.some((key) => WORD_MODIFIER.test(String(key))) ? keys.join('+') : keys.join('');
 		};
 
-		/** Optional camera on the plugin's own model seat for the session selection. */
+		/** Optional camera on the plugin's own model seat for the session catalog. */
 		let pluginCtx;
 		let modelDirectories;
-		const selectionCache = new WeakMap();
 
 		/**
 		 * The session model directory service, resolved lazily: a dynamic client
@@ -422,23 +413,6 @@ window.__ModuleLoader__.load({
 				// good and every other session's directory is still live.
 				return undefined;
 			}
-		};
-
-		/** The session's durable selection, cached so uSES sees a stable value. */
-		const selectionOf = (store) => {
-			let raw = null;
-			try {
-				raw = store.getSnapshot?.()?.current ?? null;
-			} catch {
-				raw = null;
-			}
-			const cached = selectionCache.get(store);
-			if (cached !== undefined && cached.raw === raw) return cached.value;
-			const value = (raw !== null && typeof raw.model === 'string' && raw.model.length > 0)
-				? { provider: String(raw.provider ?? ''), model: raw.model }
-				: null;
-			selectionCache.set(store, { raw, value });
-			return value;
 		};
 
 		/** No catalog read yet; one stable array so a subscriber never sees a fresh identity. */
@@ -556,20 +530,6 @@ window.__ModuleLoader__.load({
 			return useSyncStore(subscribe, getSnapshot);
 		}
 
-		/** The conversation's durable model selection (null when unavailable). */
-		function useSessionSelection(sessionId) {
-			const store = directoryStoreOf(sessionId);
-			const subscribe = _react.useMemo(
-				() => (store === undefined || typeof store.subscribe !== 'function' ? NOOP_SUBSCRIBE : (listener) => store.subscribe(listener)),
-				[store],
-			);
-			const getSnapshot = _react.useMemo(
-				() => () => (store === undefined ? null : selectionOf(store)),
-				[store],
-			);
-			return useSyncStore(subscribe, getSnapshot);
-		}
-
 		/** The conversation's model catalog groups (empty until the catalog loads). */
 		function useSessionGroups(sessionId) {
 			const store = directoryStoreOf(sessionId);
@@ -582,27 +542,23 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
-		 * What this conversation is running on right now: the router's own
-		 * decision while it drives, the user's durable pick while it defers.
+		 * What this conversation is running on right now: the router's own decision
+		 * once it has one, else the route its current mode targets. The router owns
+		 * the session's model while it is on, so a pick made through /model is not
+		 * a second source of truth here.
 		 */
-		const currentRouteOf = (session, selection) => {
+		const currentRouteOf = (session) => {
 			const primary = session.primary ?? null;
 			const aux = session.aux ?? null;
 			const status = session.status;
 			const routed = status?.route && status.route.model ? status.route : null;
-			const manual = selection !== null
-				&& session.defaultSelection !== null
-				&& !sameRoute(selection, session.defaultSelection)
-				&& !(status?.kind === 'auto' && sameRoute(selection, routed));
-			if (manual) return { provider: selection.provider, model: selection.model, manual: true, mode: 'simple' };
-			if (routed !== null && status?.kind !== 'manual') {
-				return { provider: routed.provider ?? '', model: routed.model, manual: false, mode: status?.mode === 'complex' ? 'complex' : 'simple' };
-			}
-			if (routed !== null) return { provider: routed.provider ?? '', model: routed.model, manual: true, mode: 'simple' };
 			const mode = status?.mode === 'complex' ? 'complex' : 'simple';
+			if (routed !== null) {
+				return { provider: routed.provider ?? '', model: routed.model, mode };
+			}
 			const target = mode === 'complex' ? primary : aux;
 			if (target === null || !target.model) return null;
-			return { provider: target.provider, model: target.model, manual: false, mode };
+			return { provider: target.provider, model: target.model, mode };
 		};
 		//#endregion
 		//#region client/status-pill.mjs
@@ -695,9 +651,8 @@ window.__ModuleLoader__.load({
 			const nodeRef = _react.useRef(null);
 			const sessionId = useSessionId(sessionIdProp, nodeRef);
 			const session = useSessionState(sessionId);
-			const selection = useSessionSelection(sessionId);
 			const groups = useSessionGroups(sessionId);
-			const route = currentRouteOf(session, selection);
+			const route = currentRouteOf(session);
 
 			const ref = (node) => { nodeRef.current = node; };
 			if (route === null) {
@@ -711,7 +666,7 @@ window.__ModuleLoader__.load({
 			// must too, or the seat shows a raw model id the user never picked
 			const modelLabel = modelLabelOf(groups, route.provider, route.model);
 			const mode = route.mode === 'complex' ? t.modeComplex : t.modeSimple;
-			const title = (route.manual ? t.seatManualTitle : t.seatAutoTitle)
+			const title = t.seatAutoTitle
 				.replace('{model}', route.provider.length > 0 ? `${route.provider}/${modelLabel}` : modelLabel)
 				.replace('{mode}', mode);
 
@@ -719,7 +674,7 @@ window.__ModuleLoader__.load({
 				ref,
 				title,
 				'aria-label': title,
-				'data-dual-model-router-seat': route.manual ? 'manual' : 'auto',
+				'data-dual-model-router-seat': 'auto',
 				style: {
 					display: 'inline-flex', alignItems: 'center', gap: '6px',
 					maxWidth: '260px', padding: '4px 8px', borderRadius: '8px',
@@ -729,7 +684,7 @@ window.__ModuleLoader__.load({
 			},
 				h('svg', {
 					width: 14, height: 14, viewBox: '0 0 16 16', 'aria-hidden': true,
-					style: { flex: 'none', color: route.manual ? 'var(--dsw-alias-state-warn-primary, #f59e0b)' : 'var(--dsw-alias-brand-primary, #4176e6)' },
+					style: { flex: 'none', color: 'var(--dsw-alias-brand-primary, #4176e6)' },
 				},
 					h('path', {
 						d: 'M2 4.5h3l6 7h3M2 11.5h3l1.7-2M14 4.5h-3l-1.7 2',
@@ -737,17 +692,7 @@ window.__ModuleLoader__.load({
 					})),
 				h('span', {
 					style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--dsw-alias-label-primary, inherit)' },
-				}, modelLabel),
-				// while the router drives the seat every model is router-chosen, so
-				// a chip would carry no information — only a manual pick is news
-				route.manual ? h('span', {
-					style: {
-						flex: 'none', padding: '0 5px', borderRadius: '999px',
-						border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,0.22))',
-						fontSize: '11px', lineHeight: '15px',
-						color: 'var(--dsw-alias-state-warn-primary, #f59e0b)',
-					},
-				}, t.seatManual) : null);
+				}, modelLabel));
 		}
 		//#endregion
 		//#region client/dock-status.mjs
@@ -767,18 +712,17 @@ window.__ModuleLoader__.load({
 			// the catalog's display name, not the raw provider-owned id
 			const model = modelLabelOf(groups, status.route?.provider ?? '', status.route?.model ?? '');
 			// `kind` is the protocol value the host emits ('auto'), while the
-			// palette is keyed by the surface it describes: an auto route must be
-			// tinted by its mode, not fall through to the neutral manual dot.
+			// palette is keyed by the surface it describes: an auto route is
+			// tinted by its mode.
 			const dotKey = status.kind === 'auto'
 				? (status.mode === 'complex' ? 'autoComplex' : 'autoSimple')
 				: status.kind;
-			const color = DOT_COLORS[dotKey] ?? DOT_COLORS.manual;
+			const color = DOT_COLORS[dotKey] ?? NEUTRAL_DOT;
 			let text = '';
 			if (status.kind === 'classifying') text = t.classifying;
 			else if (status.kind === 'auto' && status.mode === 'complex') text = t.autoComplex(model);
 			else if (status.kind === 'auto') text = t.autoSimple(model);
 			else if (status.kind === 'subagent') text = t.subagent(model);
-			else if (status.kind === 'manual') text = t.manual(model);
 			if (text === '') return null;
 
 			return h('div', {
@@ -1205,7 +1149,7 @@ window.__ModuleLoader__.load({
 			// pre-step fallback.
 			installPromptRouting(ctx);
 			// Seed the switch before any conversation subscribes, so a page that
-			// boots with the router on never flashes the manual model selector.
+			// boots with the router on never flashes the shipped model selector.
 			void refreshRouterState();
 
 			ctx.effect(() => () => {

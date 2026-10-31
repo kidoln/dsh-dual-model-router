@@ -538,16 +538,16 @@ test('the model seat re-reads a session directory the host replaced', async () =
 	const [seat] = optionsOf(harness.registrations, 'conversation.input.model');
 	assert.ok(seat, 'the seat is installed while the router is on');
 	hooks.render(seat.component, { sessionId: 'session-1' });
-	// one read for the durable selection, one for the catalog groups that name it
-	assert.deepEqual(reads, ['session-1', 'session-1'], 'the directory service is consulted on render');
+	// one read for the catalog groups that name the routed model
+	assert.deepEqual(reads, ['session-1'], 'the directory service is consulted on render');
 
 	// the host disposes the session binding and re-creates it: a memoized store
-	// would now be a dead object and the seat would freeze on a stale selection
+	// would now be a dead object and the seat would freeze on a stale catalog
 	directories.set('session-1', { store: { getSnapshot: () => ({ current: { provider: 'p', model: 'aux-m-2' } }) } });
 	hooks.render(seat.component, { sessionId: 'session-1' });
 	assert.deepEqual(
 		reads,
-		['session-1', 'session-1', 'session-1', 'session-1'],
+		['session-1', 'session-1'],
 		'a replaced directory must be re-resolved, never served from a cache',
 	);
 
@@ -677,15 +677,15 @@ test('the routing dot is tinted by the auto mode, not the neutral fallback', asy
 		const simple = hooks.render(dock.component, { sessionId: 'session-1' });
 		assert.match(simple.children[0].children[0].props.style.background, /success-primary/, 'an auto simple route is not the neutral dot');
 
-		// the neutral dot belongs to a manual pick only
+		// a status kind with no line of its own renders nothing at all, instead of
+		// falling back to a fabricated indicator
 		stream.onmessage({
 			data: JSON.stringify({
 				type: 'status',
-				status: { kind: 'manual', mode: 'simple', route: { provider: 'manual-p', model: 'manual-m' } },
+				status: { kind: 'off', mode: 'simple', route: { provider: 'fast-p', model: 'fast-m' } },
 			}),
 		});
-		const manual = hooks.render(dock.component, { sessionId: 'session-1' });
-		assert.match(manual.children[0].children[0].props.style.background, /idle-primary/);
+		assert.equal(hooks.render(dock.component, { sessionId: 'session-1' }), null);
 	} finally {
 		globalThis.EventSource = realEventSource;
 		harness.dispose();

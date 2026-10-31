@@ -73,11 +73,13 @@ diagnostic matches a real send; it answers `{ok, mode, source, raw, history}`.
 endpoint the browser half calls: it resolves that session's live agent,
 classifies, applies the route, and answers
 `{ok, kind, route?, mode?, applied, verdict}` — `kind` is `auto`, `subagent`,
-`manual`, `off` (the router is disabled or the chosen target route is
-incomplete) or `idle` (no live agent yet, e.g. a session that has none);
-`applied` is true only for `auto` and `subagent`; `verdict` is the classifier's
-`{mode, source, raw}` (`source` is `keyword`, `llm`, `failed` or `cancelled`),
-or `null` when nothing was classified. A refusal is never fatal to the send.
+`off` (the router is disabled or the chosen target route is incomplete) or
+`idle` (no live agent yet, e.g. a session that has none); `applied` is true
+only for `auto` and `subagent`; `verdict` is the classifier's `{mode, source,
+raw}` (`source` is `keyword`, `llm`, `failed` or `cancelled`), or `null` when
+nothing was classified. A refusal is never fatal to the send, and the endpoint
+refuses nothing on account of the session's current model: while the router is
+on it routes every prompt.
 
 `POST /api/dual-model-router/toggle` flips `enabled` in the plugin row and
 answers `{ok, enabled}` — the one path the composer switch and the keyboard
@@ -101,11 +103,12 @@ Remote invocation and so bypass `remoteAccess`'s policy. The two read routes
 (`settings`, the SSE stream) accept any authenticated caller. All of them are
 method-checked (`405`).
 
-A model selected manually in a session always wins — the router only takes over
-sessions still using the profile's default selection (or a route it wrote
-itself). Classifier failures and timeouts keep the session's current mode: a
-new session stays `simple`, but an ongoing complex task is never dropped to the
-cheap route mid-task by a transient failure.
+While the router is on it owns the session's model: a model chosen by hand
+(through `/model`, or by a client that pins one) is replaced by the router's own
+route at the next step boundary, so the on/off switch is the only way to drive a
+conversation with a model of your own. Classifier failures and timeouts keep the
+session's current mode: a new session stays `simple`, but an ongoing complex
+task is never dropped to the cheap route mid-task by a transient failure.
 
 ## Composer surfaces
 
@@ -125,11 +128,10 @@ Two surfaces sit in the composer tool row, under the input box:
   display name, resolved from the same per-session directory the shipped
   selector reads, so it matches the name in the `/model` menu; a route the
   catalog does not know yet falls back to the provider-owned id. The bare model
-  name is the normal case — every route is router-chosen, so no badge is shown. A `手动` badge
-  appears only when a pick made through the `/model` command has deferred the
-  router for this conversation. Manual selection in the composer is therefore
-  impossible while the router is on; turning the router off restores the
-  shipped selector, with no reload.
+  name is the normal case — every route is router-chosen, so no badge is shown.
+  Manual selection in the composer is impossible while the router is on, and a
+  pick made through `/model` is taken over the same way; turning the router off
+  restores the shipped selector, with no reload.
 
 A `single` slot refuses a second entry at the *same* priority ("register at a
 different priority to shadow it (lowest renders)"), and the shipped selector
@@ -178,11 +180,9 @@ decisions and the prompt-time route alike):
 - `简单任务 · 辅助模型 <model>` — the whole task runs on the auxiliary model
 - `复杂任务 · 主模型 <model> 规划，辅助模型执行` — primary plans, subagents execute
 - `子代理 · 辅助模型 <model>` — shown inside subagent conversation views
-- `手动模型 <model> · 自动路由未接管` — a manual selection deferred the router
 
 Each line carries a coloured dot: amber while classifying, green for an auto
-simple route or a subagent, blue for an auto complex route, grey for a manual
-pick.
+simple route or a subagent, blue for an auto complex route.
 
 ## Settings page
 

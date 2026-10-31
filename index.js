@@ -12,8 +12,10 @@
 //      clients, and subagents (always pinned to the fast auxiliary model,
 //      since they are the executors).
 //   3. the route — the root agent runs on the auxiliary model for simple tasks
-//      and on the strong primary model for complex ones. Manual model
-//      selections always win over this router.
+//      and on the strong primary model for complex ones. While the router is on
+//      it owns the route outright: a model chosen by hand (the /model command)
+//      is overridden at the next step boundary, so switching the router off is
+//      the only way to drive the session with a model of your own.
 //      The route is written with `agent.model.select()` — the harness's own
 //      durable selection — NOT by rewriting the `agent/request` waterfall:
 //      the loop fixes a step's provider/model while preparing it and rejects a
@@ -38,11 +40,11 @@
 // bypass `remoteAccess`'s policy.
 
 import { classifyTaskText, resetClassifierCaches } from './lib/classifier.js';
-import { isHumanPrompt, keywordHit, pickTarget, sameRoute, shouldTakeOver, userTextOf } from './lib/routing.js';
+import { isHumanPrompt, keywordHit, pickTarget, sameRoute, userTextOf } from './lib/routing.js';
 
 export const name = 'dsh-dual-model-router';
 
-export const inject = ['llm', 'agentDefaultModel', 'systemPrompt'];
+export const inject = ['llm', 'systemPrompt'];
 
 /** Row id this bundle inserts; the settings save path targets it. */
 const ROW_ID = 'dual-model-router';
@@ -104,13 +106,11 @@ function guidanceText(aux) {
  * the route this router last wrote.
  *
  * Deliberately module-scoped rather than per-apply: a Settings save re-applies
- * this plugin against sessions that are still live, and `lastRoute` is what
- * lets the router recognize the selection it wrote as its own. A per-apply map
- * would be wiped by the reload, so the router would read its own route as a
- * manual pick and stop routing that session for good. Entries are dropped on
- * `agent/disposed`; the module itself survives a config-only reload (a changed
- * source file evicts it, in which case the router falls back to recognizing its
- * configured routes as its own).
+ * this plugin against sessions that are still live, and the session's current
+ * mode, the prompt it was classified from and the route this router last wrote
+ * must survive that reload — a per-apply map would forget which task the
+ * conversation is in the middle of. Entries are dropped on `agent/disposed`;
+ * the module itself survives a config-only reload.
  */
 const sessionStates = new Map();
 
@@ -170,21 +170,10 @@ function apply(ctx, input) {
 				lastRoute: undefined,
 				// text the prompt-time endpoint already classified for this session
 				lastClassifiedText: undefined,
-				// a manual pick deferred the router for this session
-				deferred: false,
 			};
 			states.set(agent.id, state);
 		}
 		return state;
-	};
-
-	const defaultSelection = () => {
-		try {
-			const selection = ctx.agentDefaultModel?.currentSelection();
-			return selection ? { provider: selection.provider, model: selection.model } : undefined;
-		} catch {
-			return undefined;
-		}
 	};
 
 	/** Agents whose planner-guidance prompt section is already registered. */
@@ -220,9 +209,6 @@ function apply(ctx, input) {
 					const state = states.get(agent.id);
 					if (!config.enabled || !config.plannerGuidance) return '';
 					if (state === undefined || state.mode !== 'complex') return '';
-					// a manual pick defers the router: it must not keep rewriting
-					// this session's system prompt either
-					if (state.deferred === true) return '';
 					if (isSubagent(agent)) return '';
 					if (!isConfigured(config.primary)) return '';
 					return guidanceText(config.aux);
@@ -268,31 +254,6 @@ function apply(ctx, input) {
 		}
 	};
 
-	/** Whether the router still owns this agent's route (else a manual pick wins). */
-	const takeOverAllowed = (agent, state) => {
-		let current;
-		try {
-			current = agent?.model?.current?.();
-		} catch {
-			current = undefined;
-		}
-		if (shouldTakeOver(current, defaultSelection(), state.lastRoute)) return true;
-		// A route this router wrote is ALSO its own when the in-memory
-		// `lastRoute` is gone: every Settings save (and every harness restart)
-		// re-applies this plugin, and the session still carries the selection
-		// the router made. Without this, the router would mistake its own route
-		// for a manual pick and stop routing for the rest of the session.
-		//
-		// Gated on "this apply has no memory of routing the session" so the
-		// fallback stays the reload recovery it exists for: once the router HAS
-		// written a route, a selection that merely equals a configured route is
-		// a manual pick — including a user who deliberately picks exactly the
-		// primary or auxiliary model — and must win.
-		if (state.lastRoute !== undefined) return false;
-		return current !== undefined
-			&& (sameRoute(current, config.primary) || sameRoute(current, config.aux));
-	};
-
 	/**
 	 * Write this agent's route for the step that is about to run and publish it to
 	 * the composer surfaces.
@@ -302,31 +263,14 @@ function apply(ctx, input) {
 	const applyRoute = (agent, state) => {
 		if (!config.enabled || !isConfigured(config.aux)) return { kind: 'off' };
 		if (isSubagent(agent)) {
-			// subagents are the executors: they always run on the cheap model,
-			// even while a manual pick defers the root agent's own route
-			state.deferred = false;
+			// subagents are the executors: they always run on the cheap model
 			selectRoute(agent, config.aux, state);
 			const route = { provider: config.aux.provider, model: config.aux.model };
 			broadcastStatus(agent.id, { kind: 'subagent', route });
 			return { kind: 'subagent', route, mode: state.mode };
 		}
-		if (!takeOverAllowed(agent, state)) {
-			// a model the user picked: report it and leave the route alone
-			let selected;
-			try {
-				selected = agent?.model?.current?.();
-			} catch {
-				selected = undefined;
-			}
-			const route = { provider: selected?.provider ?? '', model: selected?.model ?? '' };
-			// remember the deferral so planner guidance stands down with it
-			state.deferred = true;
-			broadcastStatus(agent.id, { kind: 'manual', route });
-			return { kind: 'manual', route, mode: state.mode };
-		}
 		const target = pickTarget(state.mode, config);
 		if (!isConfigured(target)) return { kind: 'off' };
-		state.deferred = false;
 		selectRoute(agent, target, state);
 		broadcastStatus(agent.id, { kind: 'auto', mode: state.mode, route: { ...state.lastRoute } });
 		return { kind: 'auto', route: { ...state.lastRoute }, mode: state.mode };
@@ -664,7 +608,6 @@ function apply(ctx, input) {
 						},
 						config,
 						providers: await providersCatalog(),
-						defaultSelection: defaultSelection() ?? null,
 					});
 				},
 			});
@@ -822,10 +765,6 @@ function apply(ctx, input) {
 						// how long this host is willing to spend classifying: the composer
 						// holds a send for at most as long, so both sides share one knob
 						classifierTimeoutMs: config.classifierTimeoutMs,
-						// the profile's own default selection: the client compares it
-						// with the session selection to tell an auto route from a
-						// manual pick (mirrors shouldTakeOver on the request path)
-						defaultSelection: defaultSelection() ?? null,
 						status: (session !== undefined ? status.get(session) : undefined) ?? null,
 					});
 					if (!String(req.headers.accept ?? '').includes('text/event-stream')) {

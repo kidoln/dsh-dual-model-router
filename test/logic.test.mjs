@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildClassifierUserText, classifyTaskText, parseDifficulty } from '../lib/classifier.js';
-import { keywordHit, pickTarget, sameRoute, shouldTakeOver, isHumanPrompt, userTextOf } from '../lib/routing.js';
+import { keywordHit, pickTarget, sameRoute, isHumanPrompt, userTextOf } from '../lib/routing.js';
 
 const CONFIG = {
 	aux: { provider: 'p', model: 'm' },
@@ -101,15 +101,6 @@ test('sameRoute compares provider and model', () => {
 	assert.equal(sameRoute({ provider: 'a', model: 'x' }, { provider: 'a', model: 'x' }), true);
 	assert.equal(sameRoute({ provider: 'a', model: 'x' }, { provider: 'a', model: 'y' }), false);
 	assert.equal(sameRoute(undefined, { provider: 'a', model: 'x' }), false);
-});
-
-test('shouldTakeOver accepts default selection and own last route only', () => {
-	const def = { provider: 'd', model: 'd' };
-	const mine = { provider: 'p2', model: 'fast' };
-	assert.equal(shouldTakeOver({ provider: 'd', model: 'd' }, def, mine), true);
-	assert.equal(shouldTakeOver({ provider: 'p2', model: 'fast' }, def, mine), true);
-	assert.equal(shouldTakeOver({ provider: 'manual', model: 'pick' }, def, mine), false);
-	assert.equal(shouldTakeOver({ provider: 'manual', model: 'pick' }, undefined, undefined), false);
 });
 
 test('pickTarget routes complex to primary and everything else to aux', () => {

@@ -115,9 +115,6 @@ class Harness {
 		const serviceOf = overrides.get ?? (() => undefined);
 		const ctx = {
 			llm: overrides.llm ?? this.llm(),
-			agentDefaultModel: overrides.agentDefaultModel ?? {
-				currentSelection: () => ({ provider: 'default-p', model: 'default-m' }),
-			},
 			systemPrompt: {},
 			get: serviceOf,
 			effect(callback) {
@@ -283,14 +280,14 @@ test('subagents always run on the auxiliary model', async () => {
 	assert.deepEqual(harness.routes(sub), [['fast-p', 'fast-m']]);
 });
 
-test('a manual selection is never overridden', async () => {
+test('a manual selection is overridden while the router is on', async () => {
 	const harness = new Harness();
 	harness.nextVerdict = '{"difficulty":"complex"}';
 	apply(harness.ctx(), CONFIG);
 	const agent = harness.agent({ id: 'a1', session: { header: {} }, selection: { provider: 'manual-p', model: 'manual-m' } });
 	await harness.preStep(agent, [userMessage('m1', 'deep work')]);
-	assert.deepEqual(harness.routes(agent), [], 'a manual pick must not be selected over');
-	assert.deepEqual(agent.model.current(), { provider: 'manual-p', model: 'manual-m' });
+	assert.deepEqual(harness.routes(agent), [['strong-p', 'strong-m']], 'the router owns the route while it is on');
+	assert.deepEqual(agent.model.current(), { provider: 'strong-p', model: 'strong-m' });
 });
 
 test('a complex keyword short-circuits the classifier call', async () => {
@@ -653,15 +650,15 @@ test('the prompt-time route endpoint keeps the keyword shortcut', async () => {
 	assert.deepEqual(harness.routes(agent), [['strong-p', 'strong-m']]);
 });
 
-test('the prompt-time route endpoint never overrides a manual pick', async () => {
+test('the prompt-time route endpoint overrides a manual pick too', async () => {
 	const { harness, webServer, agent } = liveAgent({
 		id: 'a1',
 		session: { header: {} },
 		selection: { provider: 'manual-p', model: 'manual-m' },
 	});
 	const response = await routeNow(webServer, { sessionId: agent.id, text: 'deep work' });
-	assert.equal(response.body.kind, 'manual');
-	assert.deepEqual(harness.routes(agent), [], 'a manual pick must not be selected over');
+	assert.equal(response.body.kind, 'auto');
+	assert.deepEqual(harness.routes(agent), [['strong-p', 'strong-m']], 'the router owns the route while it is on');
 });
 
 test('the prompt-time route endpoint pins subagents to the auxiliary model', async () => {
@@ -773,7 +770,7 @@ test('the toggle route is gated and refuses non-POST methods', async () => {
 	assert.equal(editor.edited, 0);
 });
 
-test('the status snapshot carries the applied switch and the default selection', async () => {
+test('the status snapshot carries the applied switch and both routes', async () => {
 	const { webServer } = endpointHarness({ connection: { requestRejection: () => undefined } });
 	const res = fakeRes();
 	await route(webServer, SETTINGS.replace('/settings', '/status')).handler(fakeReq(), res);
@@ -782,7 +779,6 @@ test('the status snapshot carries the applied switch and the default selection',
 	assert.equal(payload.enabled, true);
 	assert.deepEqual(payload.primary, CONFIG.primary);
 	assert.deepEqual(payload.aux, CONFIG.aux);
-	assert.deepEqual(payload.defaultSelection, { provider: 'default-p', model: 'default-m' });
 	assert.equal(
 		payload.classifierTimeoutMs,
 		CONFIG.classifierTimeoutMs,
@@ -1047,28 +1043,23 @@ test('an owner Peer still writes', async () => {
 	assert.equal(editor.edited, 1);
 });
 
-test('a manual pick stands the planner guidance down with the router', async () => {
+test('a manual pick gets the planner guidance and the router\'s route', async () => {
 	const harness = new Harness();
 	harness.nextVerdict = '{"difficulty":"complex"}';
 	apply(harness.ctx(), CONFIG);
-	const auto = harness.agent({ id: 'auto1', session: { header: {} } });
-	await harness.preStep(auto, [userMessage('m1', 'deep work')]);
-	const autoSection = harness.section(auto)[0];
-	assert.ok(autoSection, 'an auto-routed root agent gets the guidance section');
-	assert.notEqual(autoSection.spec.text(), '', 'a complex auto task gets planner guidance');
-
 	const manual = harness.agent({
 		id: 'manual1',
 		session: { header: {} },
 		selection: { provider: 'manual-p', model: 'manual-m' },
 	});
-	await harness.preStep(manual, [userMessage('m2', 'deep work')]);
-	const manualSection = harness.section(manual)[0];
-	assert.ok(manualSection);
-	assert.equal(manualSection.spec.text(), '', 'a deferred session must not have its prompt rewritten');
+	await harness.preStep(manual, [userMessage('m1', 'deep work')]);
+	const section = harness.section(manual)[0];
+	assert.ok(section);
+	assert.notEqual(section.spec.text(), '', 'the router keeps owning the prompt while it is on');
+	assert.deepEqual(harness.routes(manual), [['strong-p', 'strong-m']]);
 });
 
-test('a manual pick equal to a configured route wins once the router has routed', async () => {
+test('a hand pick equal to a configured route is still taken over', async () => {
 	const harness = new Harness();
 	harness.nextVerdict = '{"difficulty":"simple"}';
 	apply(harness.ctx(), CONFIG);
@@ -1080,34 +1071,39 @@ test('a manual pick equal to a configured route wins once the router has routed'
 	// select() call of ours to distinguish it
 	agent.model.set({ provider: 'strong-p', model: 'strong-m' });
 	await harness.preStep(agent, [userMessage('m2', 'and this too')]);
-	assert.deepEqual(harness.routes(agent), [['fast-p', 'fast-m']], 'a manual pick must not be selected over');
-	assert.deepEqual(agent.model.current(), { provider: 'strong-p', model: 'strong-m' });
+	assert.deepEqual(
+		harness.routes(agent),
+		[['fast-p', 'fast-m'], ['fast-p', 'fast-m']],
+		'the simple route replaces the hand pick',
+	);
+	assert.deepEqual(agent.model.current(), { provider: 'fast-p', model: 'fast-m' });
 });
 
-test('a route this router wrote survives a reload (own-route recovery)', async () => {
+test('a reload keeps routing a session that already carries a route', async () => {
 	const harness = new Harness();
 	harness.nextVerdict = '{"difficulty":"complex"}';
 	apply(harness.ctx(), CONFIG);
-	// a fresh apply has no lastRoute; the session still carries the aux route
-	// the router itself wrote before the reload
+	// a fresh apply has an empty per-session memory; the session still carries
+	// the aux route the router itself wrote before the reload
 	const agent = harness.agent({
 		id: 'a1',
 		session: { header: {} },
 		selection: { provider: 'fast-p', model: 'fast-m' },
 	});
 	await harness.preStep(agent, [userMessage('m1', 'deep work')]);
-	assert.deepEqual(harness.routes(agent), [['strong-p', 'strong-m']], 'the recovered route is the router\'s own');
+	assert.deepEqual(harness.routes(agent), [['strong-p', 'strong-m']], 'the reload does not stop routing');
 });
 
-test('the route endpoint reports applied:false when it changed nothing', async () => {
-	const { webServer, agent } = liveAgent({
+test('the route endpoint reports the route it applied over a manual pick', async () => {
+	const { harness, webServer, agent } = liveAgent({
 		id: 'a1',
 		session: { header: {} },
 		selection: { provider: 'manual-p', model: 'manual-m' },
 	});
 	const response = await routeNow(webServer, { sessionId: agent.id, text: 'deep work' });
-	assert.equal(response.body.kind, 'manual');
-	assert.equal(response.body.applied, false, 'a refusal is not an application');
+	assert.equal(response.body.kind, 'auto');
+	assert.equal(response.body.applied, true);
+	assert.deepEqual(harness.routes(agent), [['strong-p', 'strong-m']]);
 });
 
 test('enabling refuses a route whose model does not resolve', async () => {
