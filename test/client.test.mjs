@@ -31,7 +31,14 @@ function loadClient({ react: reactOverride } = {}) {
 		throw new Error(`unexpected module request: ${id}`);
 	});
 	assert.equal(exports.name, 'dsh-dual-model-router');
-	assert.deepEqual(exports.inject, ['slots'], 'the client half must declare the slots service: the context proxy refuses an undeclared `ctx.slots` read ("cannot get property \"slots\" without inject") and the fiber fails to activate');
+	// `slots` is read directly; `remote.session` is read one level deeper, by the
+	// model directory service `ctx.get('modelDirectories')` hands back: that
+	// service is bound to THIS context, so `directoryFor()` resolves the
+	// provider catalog through our own tracker proxy. Cordis refuses an
+	// undeclared read ("cannot get property \"remote.session\" without
+	// inject"), and the lookup then falls back to the provider-owned model id
+	// on every surface.
+	assert.deepEqual(exports.inject, ['slots', 'sessions', 'remote', 'remote.session'], 'the client half must declare the services its label lookup reaches through');
 	return exports;
 }
 
@@ -105,7 +112,7 @@ function nodesOfType(node, type) {
  * `watchFires: false` models a slot whose declaration notification never
  * reaches this plugin, and `declared: []` hides the slot entirely.
  */
-function fakeContext({ modelDirectories, conversation, watchFires = true, proxyServices = false, declared = ['conversation.input.right', 'conversation.composer.dock', 'conversation.input.model', 'settings.section'] } = {}) {
+function fakeContext({ modelDirectories, conversation, remote, watchFires = true, proxyServices = false, declared = ['conversation.input.right', 'conversation.composer.dock', 'conversation.input.model', 'settings.section'] } = {}) {
 	const registrations = [];
 	const commands = [];
 	const catalog = [];
@@ -160,7 +167,7 @@ function fakeContext({ modelDirectories, conversation, watchFires = true, proxyS
 		},
 	};
 
-	const services = { shortcuts, ...(modelDirectories === undefined ? {} : { modelDirectories }), ...(conversation === undefined ? {} : { conversation }) };
+	const services = { shortcuts, ...(modelDirectories === undefined ? {} : { modelDirectories }), ...(conversation === undefined ? {} : { conversation }), ...(remote === undefined ? {} : { remote }) };
 	// cordis hands service reads back through a tracker proxy: with this on,
 	// every read is a NEW Proxy over the same target, exactly like the host.
 	const readService = (name) => {
@@ -169,6 +176,9 @@ function fakeContext({ modelDirectories, conversation, watchFires = true, proxyS
 	};
 	const ctx = {
 		slots,
+		// a declared service is reachable straight off the plugin's own context,
+		// and `remote.session` is how the directory service reads the catalog
+		...(remote === undefined ? {} : { remote }),
 		get: (name) => readService(name),
 		effect(callback) {
 			const dispose = callback();
@@ -685,6 +695,102 @@ test('the seat and the routing detail print the catalog display name, not the mo
 		groups.length = 0;
 		const fallbackText = textOf(hooks.render(dock.component, { sessionId: 'session-1' })).join(' ');
 		assert.match(fallbackText, /fast-m/, 'an unknown model falls back to its id');
+	} finally {
+		globalThis.EventSource = realEventSource;
+		harness.dispose();
+	}
+});
+
+test('a session directory the plugin cannot read still prints the catalog name', async () => {
+	const hooks = hookRuntime();
+	const client = loadClient({ react: hooks.react });
+	const groups = [
+		{ id: 'strong-p', name: 'Strong', models: [{ id: 'strong-m', name: 'Strong Model' }] },
+		{ id: 'fast-p', name: 'Fast', models: [{ id: 'fast-m', name: 'Fast Model' }] },
+	];
+	let catalogCalls = 0;
+	const harness = fakeContext({
+		// what the cordis tracker raises for the undeclared transitive read: the
+		// directory service cannot resolve the session's catalog at all
+		modelDirectories: {
+			directoryFor() {
+				throw new Error('cannot get property "remote.session" without inject');
+			},
+		},
+		remote: {
+			session: {
+				async modelCatalog() {
+					catalogCalls += 1;
+					return { ok: true, value: { groups } };
+				},
+			},
+		},
+	});
+	const streams = [];
+	const realEventSource = globalThis.EventSource;
+	globalThis.EventSource = class {
+		constructor(url) {
+			this.url = String(url);
+			streams.push(this);
+		}
+		close() {}
+	};
+	try {
+		await withFetch(() => ({ ok: true, json: async () => ({ enabled: true }) }), async () => {
+			client.apply(harness.ctx);
+			await settle();
+		});
+
+		const [seat] = optionsOf(harness.registrations, 'conversation.input.model');
+		const [dock] = optionsOf(harness.registrations, 'conversation.composer.dock');
+		assert.ok(seat, 'the seat is installed while the router is on');
+
+		// the first render seeds the page catalog; the label repaints on its reply
+		hooks.render(seat.component, { sessionId: 'session-1' });
+		await settle();
+		const stream = streams.find((entry) => entry.url.includes('session-1'));
+		assert.ok(stream, 'the seat opens one status stream for its session');
+		stream.onmessage({
+			data: JSON.stringify({
+				type: 'init',
+				enabled: true,
+				primary: { provider: 'strong-p', model: 'strong-m' },
+				aux: { provider: 'fast-p', model: 'fast-m' },
+				status: { kind: 'auto', mode: 'simple', route: { provider: 'fast-p', model: 'fast-m' } },
+			}),
+		});
+
+		const seatText = textOf(hooks.render(seat.component, { sessionId: 'session-1' })).join(' ');
+		assert.match(seatText, /Fast Model/, 'an unreadable session directory falls back to the host catalog');
+		assert.doesNotMatch(seatText, /fast-m/, 'the raw model id is not the label');
+
+		const dockText = textOf(hooks.render(dock.component, { sessionId: 'session-1' })).join(' ');
+		assert.match(dockText, /Fast Model/, 'the routing detail falls back the same way');
+
+		// a second conversation whose directory is just as unreadable rides the
+		// catalog this page already fetched — no second host round trip
+		hooks.render(dock.component, { sessionId: 'session-2' });
+		await settle();
+		const second = streams.find((entry) => entry.url.includes('session-2'));
+		assert.ok(second, 'the second conversation opens its own status stream');
+		second.onmessage({
+			data: JSON.stringify({
+				type: 'init',
+				enabled: true,
+				primary: { provider: 'strong-p', model: 'strong-m' },
+				aux: { provider: 'fast-p', model: 'fast-m' },
+				status: { kind: 'auto', mode: 'simple', route: { provider: 'fast-p', model: 'fast-m' } },
+			}),
+		});
+		const secondText = textOf(hooks.render(dock.component, { sessionId: 'session-2' })).join(' ');
+		assert.match(secondText, /Fast Model/, 'a later conversation reuses the page catalog');
+
+		// the new-conversation composer has no session and no route of its own yet:
+		// it must still never print the provider-owned id
+		const heroText = textOf(hooks.render(seat.component, {})).join(' ');
+		assert.doesNotMatch(heroText, /fast-m/, 'a composer with no session prints no provider-owned id');
+
+		assert.equal(catalogCalls, 1, 'the host catalog is fetched once per page, not once per surface');
 	} finally {
 		globalThis.EventSource = realEventSource;
 		harness.dispose();

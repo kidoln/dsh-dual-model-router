@@ -425,10 +425,11 @@ window.__ModuleLoader__.load({
 		const EMPTY_GROUPS = [];
 
 		/**
-		 * The session catalog's provider groups, read from the same directory
-		 * store the shipped selector builds. Used only to turn a provider-owned
-		 * model id into the name the selector itself would print: an unavailable
-		 * catalog just leaves the id as the label.
+		 * The session catalog's provider groups, read from the same directory store
+		 * the shipped selector builds. Used only to turn a provider-owned model id
+		 * into the name the selector itself would print: an unavailable catalog just
+		 * leaves the id as the label (`pageGroups` below covers the surfaces that
+		 * have no directory of their own).
 		 */
 		const groupsCache = new WeakMap();
 		const groupsOf = (store) => {
@@ -446,6 +447,56 @@ window.__ModuleLoader__.load({
 			if (groupsCache.get(store) === groups) return groups;
 			groupsCache.set(store, groups);
 			return groups;
+		};
+
+		/** The page's fallback catalog, and who is showing a label from it. */
+		let pageGroups = EMPTY_GROUPS;
+		let pageCatalogRequest = null;
+		const pageGroupListeners = new Set();
+
+		/** Adopt a catalog any source resolved, and re-render whoever was waiting. */
+		const publishPageGroups = (groups) => {
+			if (!Array.isArray(groups) || groups.length === 0 || groups === pageGroups) return;
+			pageGroups = groups;
+			for (const listener of [...pageGroupListeners]) {
+				try {
+					listener();
+				} catch {
+					// one surface failing must not stop the others from repainting
+				}
+			}
+		};
+
+		/**
+		 * Load the host catalog once for this page, when nothing else has.
+		 *
+		 * `remote.session.modelCatalog()` is the same call the shipped selector's
+		 * own catalog makes (protocol name: `modelCatalog`), and it needs no
+		 * session. A failure is remembered as "nothing to fall back to": the next
+		 * session that gets a directory still carries the catalog itself.
+		 */
+		const requestPageCatalog = () => {
+			if (pageGroups.length > 0 || pageCatalogRequest !== null || pluginCtx === undefined) return;
+			let session;
+			try {
+				session = pluginCtx.remote?.session;
+			} catch {
+				// a build without the remote service: no fallback, no error
+				session = undefined;
+			}
+			if (session === undefined || typeof session.modelCatalog !== 'function') return;
+			pageCatalogRequest = Promise.resolve()
+				.then(() => session.modelCatalog())
+				.then((response) => {
+					if (response?.ok === true) publishPageGroups(response.value?.groups);
+				})
+				.catch(() => {
+					// offline, unauthenticated or a host without the route: the
+					// session directories remain the source
+				})
+				.finally(() => {
+					pageCatalogRequest = null;
+				});
 		};
 
 		/** The catalog's display name for one route, falling back to its id. */
@@ -536,14 +587,39 @@ window.__ModuleLoader__.load({
 			return useSyncStore(subscribe, getSnapshot);
 		}
 
-		/** The conversation's model catalog groups (empty until the catalog loads). */
+		/**
+		 * The conversation's model catalog groups: its own directory while the host
+		 * has scoped it (empty until the catalog loads), else this page's fallback
+		 * catalog. Both sources are subscribed, so a late directory — or the first
+		 * fallback response — repaints the label instead of leaving an id behind.
+		 */
 		function useSessionGroups(sessionId) {
 			const store = directoryStoreOf(sessionId);
 			const subscribe = _react.useMemo(
-				() => (store === undefined || typeof store.subscribe !== 'function' ? NOOP_SUBSCRIBE : (listener) => store.subscribe(listener)),
+				() => (listener) => {
+					const stopDirectory = store === undefined || typeof store.subscribe !== 'function'
+						? undefined
+						: store.subscribe(listener);
+					pageGroupListeners.add(listener);
+					// seeding here, never during a render: publishing wakes listeners,
+					// which React only allows from an effect
+					const groups = groupsOf(store);
+					if (groups.length > 0) publishPageGroups(groups);
+					else requestPageCatalog();
+					return () => {
+						if (typeof stopDirectory === 'function') stopDirectory();
+						pageGroupListeners.delete(listener);
+					};
+				},
 				[store],
 			);
-			const getSnapshot = _react.useMemo(() => () => groupsOf(store), [store]);
+			const getSnapshot = _react.useMemo(
+				() => () => {
+					const groups = groupsOf(store);
+					return groups.length > 0 ? groups : pageGroups;
+				},
+				[store],
+			);
 			return useSyncStore(subscribe, getSnapshot);
 		}
 
@@ -1054,7 +1130,17 @@ window.__ModuleLoader__.load({
 		// undeclared read: `ctx.slots` without injection throws "cannot get
 		// property \"slots\" without inject" and the whole client half fails to
 		// activate. Declare it like every shipped slots-using bundle does.
-		const inject = ['slots'];
+		//
+		// `remote.session` is the same rule one level deeper: the model directory
+		// service returned by `ctx.get('modelDirectories')` is bound to THIS
+		// context, so `directoryFor()` reads `remote.session` through our own
+		// tracker proxy while it materializes a session's directory (a provider
+		// catalog read). Undeclared, that read throws, `directoryStoreOf` returns
+		// undefined, and every surface silently falls back to the provider-owned
+		// model id. `remote` and `sessions` are declared with it because they are
+		// the same access path (`remote.session`, and the session scope the
+		// directory resolves for its session binding).
+		const inject = ['slots', 'sessions', 'remote', 'remote.session'];
 
 		/**
 		 * Classify one about-to-be-sent prompt and record its route on the host.

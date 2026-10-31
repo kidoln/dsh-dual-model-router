@@ -133,6 +133,24 @@ Two surfaces sit in the composer tool row, under the input box:
   pick made through `/model` is taken over the same way; turning the router off
   restores the shipped selector, with no reload.
 
+Every surface that names a model — this seat and the routing line below the
+composer card, in every conversation including a subagent view — resolves it the
+same way, so they never disagree. Two details of that lookup are worth knowing:
+
+- The client half declares `slots`, `sessions`, `remote` and `remote.session`.
+  The directory service `ctx.get('modelDirectories')` hands back is bound to the
+  *calling* context, so `directoryFor()` resolves the provider catalog through
+  this plugin's own tracker proxy: an undeclared `remote.session` throws
+  (`cannot get property "remote.session" without inject`), and the lookup then
+  silently prints the provider-owned id on every surface. Declare the services a
+  label needs, or the fallback becomes the label.
+- A composer with no session directory — the new-conversation hero, or a session
+  the host has not scoped yet — falls back to `remote.session.modelCatalog()`, a
+  session-less call fetched at most once per page and shared by every surface.
+  The per-session directory stays the primary source, since it carries the
+  shipped selector's own invalidation; the page catalog only fills the gap where
+  the alternative is printing a raw id.
+
 A `single` slot refuses a second entry at the *same* priority ("register at a
 different priority to shadow it (lowest renders)"), and the shipped selector
 holds priority `0` on this slot, so the seat registers below it. For a *dynamic*
@@ -180,6 +198,10 @@ decisions and the prompt-time route alike):
 - `简单任务 · 辅助模型 <model>` — the whole task runs on the auxiliary model
 - `复杂任务 · 主模型 <model> 规划，辅助模型执行` — primary plans, subagents execute
 - `子代理 · 辅助模型 <model>` — shown inside subagent conversation views
+
+`<model>` is the model catalog's display name — the same name the `/model` menu
+and the seat print — not the provider-owned id (see Composer surfaces above for
+the two ways that lookup is sourced).
 
 Each line carries a coloured dot: amber while classifying, green for an auto
 simple route or a subagent, blue for an auto complex route.
