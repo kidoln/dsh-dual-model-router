@@ -21,9 +21,10 @@
 //      the loop fixes a step's provider/model while preparing it and rejects a
 //      waterfall result that diverges, so a route change takes effect at the
 //      next step boundary.
-//   4. system prompt   — while a root agent works on a complex task, an
-//      agent-scoped prompt section tells the primary model to plan first and
-//      delegate every execution step to subagents.
+//   4. system prompt   — while a root agent works on a complex task, agent-scoped
+//      prompt sections tell the primary model to plan first and delegate every
+//      execution step to subagents, followed by the user's own additional
+//      instructions (`extraPrompt`, the settings page's free-text box).
 //
 // The settings save path goes through ctx.configEditor, which hot-applies the
 // change; this package deliberately declares no Loader Config schema so it
@@ -50,6 +51,14 @@ export const inject = ['llm', 'systemPrompt'];
 const ROW_ID = 'dual-model-router';
 /** Late placement for the planner-guidance prompt section. */
 const SECTION_ORDER = 800;
+/**
+ * Placement of the user-authored extra-instructions section: immediately after
+ * the planner guidance, so both plugin sections stay adjacent and read in the
+ * order they were configured.
+ */
+const EXTRA_SECTION_ORDER = SECTION_ORDER + 1;
+/** Longest user-authored instruction block the settings page may inject. */
+const EXTRA_PROMPT_LIMIT = 8000;
 /**
  * Recent human/assistant entries read from a session for classification. The
  * classifier itself keeps a smaller, character-bounded subset; collecting a
@@ -82,12 +91,40 @@ function resolveConfig(input) {
 			? Math.min(120000, Math.max(1000, Math.trunc(value.classifierTimeoutMs)))
 			: 15000,
 		plannerGuidance: value.plannerGuidance !== false,
+		extraPrompt: typeof value.extraPrompt === 'string'
+			? value.extraPrompt.trim().slice(0, EXTRA_PROMPT_LIMIT)
+			: '',
 	};
 }
 
 const isConfigured = (route) => route.provider.length > 0 && route.model.length > 0;
 
 const isSubagent = (agent) => agent?.session?.header?.origin === 'subagent';
+
+/**
+ * Prompt variable carrying the user's extra instructions.
+ *
+ * The text is never inlined into a section: sections are interpolated for
+ * `{{variable}}` references and an unknown or MALFORMED reference throws, which
+ * would break every request in the scope — and `interpolate: false` is not
+ * honoured by every harness version. The settings box holds arbitrary user text
+ * (a pasted Handlebars/Jinja template is an easy accident), so the text travels
+ * through a variable: a substituted value is not rescanned, so it reaches the
+ * model exactly as typed, braces and all.
+ */
+const EXTRA_VARIABLE = 'dual_model_router_extra';
+
+/**
+ * The user's own extra instructions: a one-line lead-in that names their source
+ * (the model must be able to tell configured guidance from the task it was
+ * given) followed by the `{{variable}}` reference above.
+ */
+function extraPromptText() {
+	return [
+		'Additional instructions from the user (dsh-dual-model-router):',
+		`{{${EXTRA_VARIABLE}}}`,
+	].join('\n');
+}
 
 /** Planner guidance shown to the primary model during a complex task. */
 function guidanceText(aux) {
@@ -176,54 +213,99 @@ function apply(ctx, input) {
 		return state;
 	};
 
-	/** Agents whose planner-guidance prompt section is already registered. */
+	/** Agents whose prompt sections are all registered. */
 	const sectionAgents = new Set();
 
-	/** Agent-owned disposers (the agent's fiber owns them; the plugin must release them). */
-	const agentDisposers = new Map(); // agentId -> { section }
+	/**
+	 * Agent-owned section registrations: the agent's fiber owns them, so this
+	 * plugin must release them itself on teardown.
+	 * agentId -> Array<{ name: string, dispose: () => void }>
+	 */
+	const agentDisposers = new Map();
 
 	/** Release the agent-scoped hooks this plugin installed for one agent. */
 	const releaseAgent = (agentId) => {
 		const held = agentDisposers.get(agentId);
 		if (held === undefined) return;
 		agentDisposers.delete(agentId);
-		for (const dispose of [held.section]) {
-			if (typeof dispose !== 'function') continue;
+		for (const entry of held) {
+			if (typeof entry?.dispose !== 'function') continue;
 			try {
-				dispose();
+				entry.dispose();
 			} catch {
 				// cleanup must not throw
 			}
 		}
 	};
 
-	/** Register this agent's guidance section lazily; applies from the next assembly. */
-	const ensureSection = (agent) => {
+	/**
+	 * Whether `EXTRA_VARIABLE` is registered. The extra-instructions section may
+	 * only reference it once it exists — a missing reference throws during
+	 * assembly — so an unsupported harness turns the feature off rather than
+	 * breaking the request.
+	 */
+	let extraVariableReady = false;
+
+	/**
+	 * The prompt sections this plugin contributes to one agent. Registration is
+	 * per-agent and one-shot; each `text` provider decides per assembly, and
+	 * every gate below returns '' rather than unregistering.
+	 */
+	const promptSections = (agent) => [
+		{
+			name: `dual-model-router/${agent.id}`,
+			order: SECTION_ORDER,
+			interpolate: false,
+			text: () => {
+				const state = states.get(agent.id);
+				if (!config.enabled || !config.plannerGuidance) return '';
+				if (state === undefined || state.mode !== 'complex') return '';
+				if (isSubagent(agent)) return '';
+				if (!isConfigured(config.primary)) return '';
+				return guidanceText(config.aux);
+			},
+		},
+		{
+			// The user's own instructions, injected alongside the planner guidance:
+			// complex ROOT tasks only, exactly like the guidance above, and
+			// independent of the `plannerGuidance` switch — that switch owns the
+			// built-in text, not this one.
+			//
+			// No `interpolate: false` here (unlike the section above): this text IS a
+			// `{{variable}}` reference and must be interpolated — the user's own
+			// words travel through that variable, untouched by the scanner.
+			name: `dual-model-router/${agent.id}/extra`,
+			order: EXTRA_SECTION_ORDER,
+			text: () => {
+				if (!extraVariableReady || config.extraPrompt.length === 0) return '';
+				const state = states.get(agent.id);
+				if (!config.enabled) return '';
+				if (state === undefined || state.mode !== 'complex') return '';
+				if (isSubagent(agent)) return '';
+				if (!isConfigured(config.primary)) return '';
+				return extraPromptText();
+			},
+		},
+	];
+
+	/** Register this agent's prompt sections lazily; applies from the next assembly. */
+	const ensureSections = (agent) => {
 		if (sectionAgents.has(agent.id)) return;
-		try {
-			const section = agent.ctx.systemPrompt.section({
-				name: `dual-model-router/${agent.id}`,
-				order: SECTION_ORDER,
-				interpolate: false,
-				text: () => {
-					const state = states.get(agent.id);
-					if (!config.enabled || !config.plannerGuidance) return '';
-					if (state === undefined || state.mode !== 'complex') return '';
-					if (isSubagent(agent)) return '';
-					if (!isConfigured(config.primary)) return '';
-					return guidanceText(config.aux);
-				},
-			});
-			// Only claim the agent once registration SUCCEEDED: a duplicate name
-			// throws, and a registration this agent never got must be retried by
-			// the next step instead of being remembered as done.
-			sectionAgents.add(agent.id);
-			const held = agentDisposers.get(agent.id) ?? {};
-			held.section = section;
-			agentDisposers.set(agent.id, held);
-		} catch {
-			// section registration failure must never break the request
+		const installed = agentDisposers.get(agent.id) ?? [];
+		let complete = true;
+		for (const spec of promptSections(agent)) {
+			if (installed.some((entry) => entry.name === spec.name)) continue;
+			try {
+				installed.push({ name: spec.name, dispose: agent.ctx.systemPrompt.section(spec) });
+			} catch {
+				// A refused section (a duplicate name in this layer) must never break
+				// the request, and must be retried by the next step instead of being
+				// remembered as done — while the sections that DID register stay put.
+				complete = false;
+			}
 		}
+		agentDisposers.set(agent.id, installed);
+		if (complete) sectionAgents.add(agent.id);
 	};
 
 	/**
@@ -379,6 +461,23 @@ function apply(ctx, input) {
 		return verdict;
 	};
 
+	// The extra instructions' value, registered globally and BEFORE the agent
+	// hooks below so that a teardown releases the referencing sections first and
+	// the variable last: a live section whose variable has already gone would
+	// throw during assembly.
+	ctx.effect(() => {
+		if (typeof ctx.systemPrompt?.variable !== 'function') return () => {};
+		const dispose = ctx.systemPrompt.variable(
+			EXTRA_VARIABLE,
+			() => (config.enabled ? config.extraPrompt : ''),
+		);
+		extraVariableReady = true;
+		return () => {
+			extraVariableReady = false;
+			dispose();
+		};
+	}, 'dsh-dual-model-router: extra-instructions variable');
+
 	// Global waterfalls (the shipped checkpoint-policy pattern): every agent's
 	// steps pass here no matter when or where the agent was created, so
 	// fiber-reload races cannot leave sessions unmanaged.
@@ -402,7 +501,7 @@ function apply(ctx, input) {
 					// agent/pre-step fires every step and claims machine-generated
 					// user-role messages too (goal rounds, subagent reports); only a
 					// human prompt may re-decide the mode
-					ensureSection(agent);
+					ensureSections(agent);
 					let latest;
 					for (let index = messages.length - 1; index >= 0; index -= 1) {
 						if (isHumanPrompt(messages[index])) {
@@ -676,6 +775,9 @@ function apply(ctx, input) {
 								? route.reasoningEffort.trim().slice(0, 32)
 								: '';
 							patch[key] = { provider, model, reasoningEffort };
+						}
+						if (typeof raw.extraPrompt === 'string') {
+							patch.extraPrompt = raw.extraPrompt.trim().slice(0, EXTRA_PROMPT_LIMIT);
 						}
 						if (Array.isArray(raw.complexKeywords)) {
 							patch.complexKeywords = raw.complexKeywords

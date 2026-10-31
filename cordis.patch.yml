@@ -13,5 +13,8 @@
           model: DeepSeek-V4-Flash
         classifierTimeoutMs: 15000
         plannerGuidance: true
+        # free text injected into the primary model's system prompt for complex
+        # tasks (root agent only); empty means inject nothing
+        extraPrompt: ""
         complexKeywords:
           - hard

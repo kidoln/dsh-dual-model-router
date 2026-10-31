@@ -48,6 +48,9 @@ window.__ModuleLoader__.load({
 			guidanceLabel: 'Inject planner guidance for complex tasks',
 			keywordsLabel: 'Complex-task keywords (comma separated; any hit forces complex, no LLM call)',
 			keywordsPlaceholder: 'e.g. hard, refactor, deep-dive',
+			extraPromptLabel: 'Extra instructions injected into the prompt (optional)',
+			extraPromptPlaceholder: 'e.g. when a subtask builds on conclusions already reached in this conversation, dispatch it with subagent_fork, since the child must see what happened; use subagent for independent tasks.',
+			extraPromptHint: 'While automatic routing is on and a task is classified as complex, this text is appended to the primary model\'s system prompt (right after the planner guidance). It is the place to steer how the planner uses subagents — subagents run on the auxiliary model, so delegating is cheap. Leave it empty to inject nothing.',
 			effortLabel: 'Reasoning effort',
 			effortDefault: 'Default (model own)',
 			save: 'Save',
@@ -77,6 +80,9 @@ window.__ModuleLoader__.load({
 			guidanceLabel: '复杂任务时注入规划者指引',
 			keywordsLabel: '复杂任务关键词（逗号分隔；命中即判复杂，跳过判别调用）',
 			keywordsPlaceholder: '例如：hard, 深度分析, 重构',
+			extraPromptLabel: '额外注入提示词（可选）',
+			extraPromptPlaceholder: '例如：当子任务需要基于当前对话中已经得出的结论时，优先用 subagent_fork 派发，因为子代理需要知道之前发生了什么；全新的独立任务用 subagent。',
+			extraPromptHint: '自动路由开启且任务被判为复杂时，这段文字会追加到主模型系统提示词的末尾（紧接规划者指引之后）。适合用来指导规划模型如何使用子代理：子代理运行在辅助模型上，委派成本很低。留空则不注入。',
 			effortLabel: '思考强度',
 			effortDefault: '默认（模型自身）',
 			save: '保存',
@@ -823,6 +829,7 @@ window.__ModuleLoader__.load({
 			const [timeoutMs, setTimeoutMs] = _react.useState(15000);
 			const [guidance, setGuidance] = _react.useState(true);
 			const [keywordsText, setKeywordsText] = _react.useState('');
+			const [extraPrompt, setExtraPrompt] = _react.useState('');
 			const [status, setStatus] = _react.useState(null);
 			const [saving, setSaving] = _react.useState(false);
 
@@ -842,6 +849,7 @@ window.__ModuleLoader__.load({
 						setTimeoutMs(payload.config.classifierTimeoutMs ?? 15000);
 						setGuidance(payload.config.plannerGuidance !== false);
 						setKeywordsText(Array.isArray(payload.config.complexKeywords) ? payload.config.complexKeywords.join(', ') : '');
+						setExtraPrompt(typeof payload.config.extraPrompt === 'string' ? payload.config.extraPrompt : '');
 						setPrimaryEffort(payload.config.primary?.reasoningEffort ?? '');
 						setAuxEffort(payload.config.aux?.reasoningEffort ?? '');
 					})
@@ -862,6 +870,7 @@ window.__ModuleLoader__.load({
 							aux: { ...parseRouteValue(aux), reasoningEffort: effectiveEffortOf(providers, aux, auxEffort) },
 							classifierTimeoutMs: timeoutMs,
 							plannerGuidance: guidance,
+							extraPrompt,
 							complexKeywords: keywordsText.split(/[,，;；、\s]+/u).map((word) => word.trim()).filter((word) => word.length > 0),
 						}),
 					});
@@ -929,6 +938,14 @@ window.__ModuleLoader__.load({
 					background: 'var(--dsw-alias-bg-layer-2, transparent)',
 					color: 'inherit', fontSize: '13px',
 				},
+				extraPromptInput: {
+					padding: '8px 10px', borderRadius: '8px', width: '100%', boxSizing: 'border-box',
+					border: '1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.15))',
+					background: 'var(--dsw-alias-bg-layer-2, transparent)',
+					color: 'inherit', fontSize: '13px', fontFamily: 'inherit', lineHeight: '20px',
+					resize: 'vertical',
+				},
+				extraPromptHint: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary, #666)' },
 			};
 
 			return h('div', { style: styles.page },
@@ -999,6 +1016,16 @@ window.__ModuleLoader__.load({
 						h('label', { style: { ...styles.checkRow, alignSelf: 'flex-start' } },
 							h('input', { type: 'checkbox', checked: guidance, onChange: (event) => setGuidance(event.target.checked) }),
 							h('span', { style: { fontSize: '13px' } }, t.guidanceLabel))),
+					h('label', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
+						h('span', { style: { fontSize: '13px', fontWeight: 500 } }, t.extraPromptLabel),
+						h('textarea', {
+							value: extraPrompt,
+							placeholder: t.extraPromptPlaceholder,
+							rows: 5,
+							onChange: (event) => setExtraPrompt(event.target.value),
+							style: styles.extraPromptInput,
+						}),
+						h('span', { style: styles.extraPromptHint }, t.extraPromptHint)),
 					enabled && !bothConfigured ? h('p', { style: styles.warn }, t.unconfigured) : null,
 					h('div', { style: styles.actions },
 						h('button', {

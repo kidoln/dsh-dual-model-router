@@ -92,6 +92,14 @@ function textOf(node) {
 	return textOf(node.children);
 }
 
+/** Every element in a tree whose `type` matches, depth-first. */
+function nodesOfType(node, type) {
+	if (node === null || node === undefined || typeof node === 'string') return [];
+	if (Array.isArray(node)) return node.flatMap((child) => nodesOfType(child, type));
+	const found = node.type === type ? [node] : [];
+	return [...found, ...nodesOfType(node.children, type)];
+}
+
 /**
  * Minimal client context: effects run immediately, declarations are live.
  * `watchFires: false` models a slot whose declaration notification never
@@ -220,6 +228,63 @@ test('the client half registers every surface it owns', async () => {
 	assert.match(command.defaults['web:macos'].code, /^Key[A-Z]$/);
 	assert.ok(!('web:linux' in command.defaults), 'web:linux has no legal default (see README)');
 	assert.equal(command.resolve({}).status, 'handled');
+});
+
+test('the settings page loads, edits and saves the extra instructions', async () => {
+	const hooks = hookRuntime();
+	const client = loadClient({ react: hooks.react });
+	const harness = fakeContext();
+	let saved;
+	await withFetch((url, options) => {
+		if (url.includes('/settings/save')) {
+			saved = JSON.parse(options.body);
+			return { ok: true, status: 200, json: async () => ({ ok: true }) };
+		}
+		return {
+			ok: true,
+			status: 200,
+			json: async () => ({
+				config: {
+					enabled: true,
+					primary: { provider: 'strong-p', model: 'strong-m', reasoningEffort: '' },
+					aux: { provider: 'fast-p', model: 'fast-m', reasoningEffort: '' },
+					classifierTimeoutMs: 15000,
+					plannerGuidance: true,
+					complexKeywords: ['hard'],
+					extraPrompt: 'prefer subagent_fork',
+				},
+				providers: [{ id: 'strong-p', name: 'Strong', models: [{ id: 'strong-m', name: 'Strong Model' }] }],
+			}),
+		};
+	}, async () => {
+		client.apply(harness.ctx);
+		await settle();
+
+		const [section] = optionsOf(harness.registrations, 'settings.section');
+		assert.ok(section, 'the settings page is registered');
+		const textarea = () => nodesOfType(hooks.render(section.component, {}), 'textarea')[0];
+		// one pass reads the config, the next renders it
+		hooks.render(section.component, {});
+		await settle();
+		const [box] = nodesOfType(hooks.render(section.component, {}), 'textarea');
+		assert.ok(box, 'the page must offer the extra-instructions box');
+		assert.equal(box.props.value, 'prefer subagent_fork', 'the box loads what the host has');
+
+		// editing is local until Save; the box renders the edited value back
+		box.props.onChange({ target: { value: '  use subagent_fork when context is shared  ' } });
+		assert.equal(textarea().props.value, '  use subagent_fork when context is shared  ');
+
+		const [button] = nodesOfType(hooks.render(section.component, {}), 'button');
+		assert.equal(button.props.disabled, false, 'both models are configured, so Save is enabled');
+		button.props.onClick();
+		await settle();
+		assert.equal(
+			saved?.extraPrompt,
+			'  use subagent_fork when context is shared  ',
+			'Save posts the box verbatim; the host trims and caps it',
+		);
+	});
+	harness.dispose();
 });
 
 test('the model seat is only taken over while the router is on', async () => {

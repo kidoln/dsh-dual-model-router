@@ -22,6 +22,37 @@ import assert from 'node:assert/strict';
 import { apply } from '../index.js';
 import { isHumanPrompt } from '../lib/routing.js';
 
+/**
+ * dsh-system-prompt's section interpolation, reduced to what this plugin uses:
+ * `{{name}}` resolves from the registered prompt variables, and a malformed or
+ * unknown reference THROWS. The real `renderPrompt` does exactly that, which is
+ * why the extra instructions travel through a variable instead of being inlined
+ * into the section — a pasted `{{...}}` in the settings box would otherwise
+ * break every request.
+ */
+function interpolatePrompt(text, variables) {
+	const GROUP = /^\{\{([^{}]*)\}\}/u;
+	let result = '';
+	let last = 0;
+	for (let open = text.indexOf('{{'); open >= 0; open = text.indexOf('{{', last)) {
+		const group = GROUP.exec(text.slice(open));
+		if (group === null) {
+			if (text.indexOf('}}', open + 2) >= 0) {
+				throw new Error(`malformed prompt variable reference in "${text.slice(open, open + 16)}…"`);
+			}
+			result += text.slice(last, open + 2);
+			last = open + 2;
+			continue;
+		}
+		const name = group[0].slice(2, -2);
+		if (!/^[a-z][a-z0-9_]*$/u.test(name)) throw new Error(`malformed prompt variable reference "{{${name}}}"`);
+		if (!variables.has(name)) throw new Error(`unknown prompt variable "{{${name}}}"`);
+		result += text.slice(last, open) + variables.get(name)();
+		last = open + group[0].length;
+	}
+	return result + text.slice(last);
+}
+
 const CONFIG = {
 	enabled: true,
 	primary: { provider: 'strong-p', model: 'strong-m', reasoningEffort: '' },
@@ -37,6 +68,7 @@ class Harness {
 		this.rootHooks = [];
 		this.agentHooks = new Map();
 		this.sections = new Map();
+		this.variables = new Map();
 		this.pluginDisposers = [];
 		this.llmCalls = [];
 	}
@@ -57,6 +89,7 @@ class Harness {
 		agent.id = `t${++agentSeq}-${agent.id}`;
 		const hooks = this.agentHooks;
 		const sections = this.sections;
+		const variables = this.variables;
 		// the session's recorded model selection, exactly what the real
 		// `agent.model.current()` reads: the profile default until something
 		// (a manual pick or this router) records another one.
@@ -96,7 +129,11 @@ class Harness {
 					if (list.some((entry) => entry.spec.name === spec.name)) {
 						throw new Error(`duplicate section name: ${spec.name}`);
 					}
-					const record = { spec };
+					// real behaviour: renderPrompt interpolates the section text, and an
+					// unknown or malformed `{{reference}}` throws
+					const record = {
+						spec: { ...spec, text: () => interpolatePrompt(String(spec.text()), variables) },
+					};
 					list.push(record);
 					sections.set(agent.id, list);
 					return () => {
@@ -115,7 +152,13 @@ class Harness {
 		const serviceOf = overrides.get ?? (() => undefined);
 		const ctx = {
 			llm: overrides.llm ?? this.llm(),
-			systemPrompt: {},
+			systemPrompt: {
+				variable(name, provider) {
+					if (harness.variables.has(name)) throw new Error(`duplicate prompt variable: ${name}`);
+					harness.variables.set(name, provider);
+					return () => harness.variables.delete(name);
+				},
+			},
 			get: serviceOf,
 			effect(callback) {
 				const disposer = callback();
@@ -163,6 +206,16 @@ class Harness {
 	/** The systemPrompt sections the plugin registered on one agent's fiber. */
 	section(agent) {
 		return this.sections.get(agent.id) ?? [];
+	}
+
+	/** The planner-guidance section of one agent (see `promptSections`). */
+	guidanceSection(agent) {
+		return this.section(agent).find((entry) => entry.spec.name === `dual-model-router/${agent.id}`)?.spec;
+	}
+
+	/** The user-authored extra-instructions section of one agent. */
+	extraSection(agent) {
+		return this.section(agent).find((entry) => entry.spec.name === `dual-model-router/${agent.id}/extra`)?.spec;
 	}
 
 	/** The agent-scoped hooks the plugin registered on one agent's fiber. */
@@ -305,14 +358,94 @@ test('planner guidance is served only to a complex root agent', async () => {
 	apply(harness.ctx(), CONFIG);
 	const agent = harness.agent({ id: 'a1', session: { header: {} } });
 	await harness.preStep(agent, [userMessage('m1', 'deep work')]);
-	const section = harness.section(agent)[0]?.spec;
+	const section = harness.guidanceSection(agent);
 	assert.ok(section, 'a section must be registered for the agent');
 	assert.match(section.text(), /COMPLEX/);
 
 	const sub = harness.agent({ id: 's1', session: { header: { origin: 'subagent' } } });
 	await harness.preStep(sub, [userMessage('m1', 'deep work')]);
-	const subSection = harness.section(sub)[0]?.spec;
-	assert.equal(subSection.text(), '', 'subagents get no planner guidance');
+	assert.equal(harness.guidanceSection(sub).text(), '', 'subagents get no planner guidance');
+});
+
+test('extra instructions ride right after the guidance for a complex root agent', async () => {
+	const harness = new Harness();
+	harness.nextVerdict = '{"difficulty":"complex"}';
+	apply(harness.ctx(), {
+		...CONFIG,
+		extraPrompt: '  use subagent_fork when the subtask builds on this conversation  ',
+	});
+	const agent = harness.agent({ id: 'a1', session: { header: {} } });
+	await harness.preStep(agent, [userMessage('m1', 'deep work')]);
+
+	const extra = harness.extraSection(agent);
+	assert.ok(extra, 'the extra-instructions section must be registered');
+	assert.match(extra.text(), /^Additional instructions from the user/);
+	assert.match(extra.text(), /use subagent_fork when the subtask builds on this conversation/);
+	assert.ok(
+		extra.order > harness.guidanceSection(agent).order,
+		'the extra instructions must render after the planner guidance',
+	);
+
+	// a subagent is an executor: the dispatch instructions are for its parent
+	const sub = harness.agent({ id: 's1', session: { header: { origin: 'subagent' } } });
+	await harness.preStep(sub, [userMessage('m1', 'deep work')]);
+	assert.equal(harness.extraSection(sub).text(), '', 'subagents get no extra instructions');
+});
+
+test('extra instructions stand down for a simple task, an empty box or a disabled router', async () => {
+	const harness = new Harness();
+	harness.nextVerdict = '{"difficulty":"simple"}';
+	apply(harness.ctx(), { ...CONFIG, extraPrompt: 'prefer subagent_fork' });
+	const agent = harness.agent({ id: 'a1', session: { header: {} } });
+	await harness.preStep(agent, [userMessage('m1', 'rename this')]);
+	assert.equal(harness.extraSection(agent).text(), '', 'the extra instructions are complex-task only');
+
+	// an empty box (or a whitespace-only one) injects nothing, even when complex
+	harness.nextVerdict = '{"difficulty":"complex"}';
+	harness.disposeApply();
+	apply(harness.ctx(), { ...CONFIG, extraPrompt: '   ' });
+	await harness.preStep(agent, [userMessage('m2', 'deep work')]);
+	assert.equal(harness.extraSection(agent).text(), '', 'a blank box injects nothing');
+
+	// the router owns the injection: off means no extra instructions
+	harness.disposeApply();
+	apply(harness.ctx(), { ...CONFIG, enabled: false, extraPrompt: 'prefer subagent_fork' });
+	await harness.preStep(agent, [userMessage('m3', 'deep work')]);
+	assert.equal(harness.extraSection(agent).text(), '', 'a disabled router injects nothing');
+});
+
+test('braces in the extra instructions are injected verbatim, never interpolated', async () => {
+	const harness = new Harness();
+	harness.nextVerdict = '{"difficulty":"complex"}';
+	const prompt = 'use {{ this_is_not_a_variable }} as the placeholder';
+	apply(harness.ctx(), { ...CONFIG, extraPrompt: prompt });
+	const agent = harness.agent({ id: 'a1', session: { header: {} } });
+	await harness.preStep(agent, [userMessage('m1', 'deep work')]);
+	// the raw text sitting in a section would make renderPrompt THROW (unknown
+	// reference); the variable indirection keeps arbitrary braces safe
+	assert.match(harness.extraSection(agent).text(), /use \{\{ this_is_not_a_variable \}\} as the placeholder/);
+});
+
+test('a harness without prompt variables injects nothing instead of throwing', async () => {
+	const harness = new Harness();
+	harness.nextVerdict = '{"difficulty":"complex"}';
+	const ctx = harness.ctx();
+	delete ctx.systemPrompt.variable;
+	apply(ctx, { ...CONFIG, extraPrompt: 'prefer subagent_fork' });
+	const agent = harness.agent({ id: 'a1', session: { header: {} } });
+	await harness.preStep(agent, [userMessage('m1', 'deep work')]);
+	assert.equal(harness.extraSection(agent).text(), '', 'no variable, no dangling reference');
+	assert.match(harness.guidanceSection(agent).text(), /COMPLEX/, 'the rest of the plugin is unaffected');
+});
+
+test('the extra instructions are independent of the plannerGuidance switch', async () => {
+	const harness = new Harness();
+	harness.nextVerdict = '{"difficulty":"complex"}';
+	apply(harness.ctx(), { ...CONFIG, plannerGuidance: false, extraPrompt: 'prefer subagent_fork' });
+	const agent = harness.agent({ id: 'a1', session: { header: {} } });
+	await harness.preStep(agent, [userMessage('m1', 'deep work')]);
+	assert.equal(harness.guidanceSection(agent).text(), '', 'the built-in guidance is switched off');
+	assert.match(harness.extraSection(agent).text(), /prefer subagent_fork/);
 });
 
 test('continuation steps with no user message are not classified', async () => {
@@ -337,7 +470,7 @@ test('teardown releases agent-scoped sections', async () => {
 	const agent = harness.agent({ id: 'a1', session: { header: {} } });
 	await harness.preStep(agent, [userMessage('m1', 'x')]);
 
-	assert.equal(harness.section(agent).length, 1, 'section registered');
+	assert.equal(harness.section(agent).length, 2, 'both prompt sections registered');
 	assert.equal(
 		harness.hooks(agent).length,
 		0,
@@ -368,7 +501,7 @@ test('a reload re-registers cleanly with the new config for a live agent', async
 	// the stale section must be gone, so this must not throw/hit the duplicate name
 	harness.nextVerdict = '{"difficulty":"complex"}';
 	await harness.preStep(agent, [userMessage('m2', 'more deep work')]);
-	const section = harness.section(agent)[0]?.spec;
+	const section = harness.guidanceSection(agent);
 	assert.ok(section, 'the reloaded apply must own a fresh section');
 	assert.match(section.text(), /fast2-p\/fast2-m/, 'guidance must use the new aux route');
 	assert.deepEqual(harness.routes(agent), [['fast-p', 'fast-m'], ['strong-p', 'strong-m']]);
@@ -582,6 +715,53 @@ test('an admitted request still works', async () => {
 	);
 	assert.equal(saveRes.status, 200, saveRes.body);
 	assert.equal(editor.edited, 1);
+});
+
+test('the save route persists the extra instructions, trimmed and capped', async () => {
+	const { harness, webServer, editor } = endpointHarness({
+		connection: { requestRejection: () => undefined },
+		rowConfig: { ...CONFIG },
+	});
+
+	const saved = fakeRes();
+	await route(webServer, SAVE).handler(
+		fakeReq({
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ extraPrompt: '  prefer subagent_fork here  ' }),
+		}),
+		saved,
+	);
+	assert.equal(saved.status, 200, saved.body);
+	assert.equal(editor.current.extraPrompt, 'prefer subagent_fork here');
+
+	// the same clamp `resolveConfig` applies: a paste cannot exceed the limit
+	const clamped = fakeRes();
+	await route(webServer, SAVE).handler(
+		fakeReq({
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ extraPrompt: 'x'.repeat(9000) }),
+		}),
+		clamped,
+	);
+	assert.equal(clamped.status, 200, clamped.body);
+	assert.equal(editor.current.extraPrompt.length, 8000);
+
+	// the read route the page loads from exposes the field, so a reload shows it
+	const getRes = fakeRes();
+	await route(webServer, SETTINGS).handler(fakeReq(), getRes);
+	assert.equal(typeof JSON.parse(getRes.body).config.extraPrompt, 'string');
+
+	// an unrelated save (no extraPrompt key) leaves the stored value alone
+	const untouched = fakeRes();
+	await route(webServer, SAVE).handler(
+		fakeReq({ method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"enabled":true}' }),
+		untouched,
+	);
+	assert.equal(untouched.status, 200, untouched.body);
+	assert.equal(editor.current.extraPrompt, 'x'.repeat(8000));
+	assert.equal(harness.llmCalls.length, 0);
 });
 
 // ---------- prompt-time routing endpoint ----------
@@ -830,7 +1010,7 @@ test('machine-generated user messages never re-decide the mode', async () => {
 
 	assert.equal(harness.llmCalls.length, 1, 'only the human prompt may be classified');
 	assert.deepEqual(harness.routes(agent), [['strong-p', 'strong-m']], 'mode must stay complex');
-	assert.match(harness.section(agent)[0].spec.text(), /COMPLEX/, 'planner guidance must survive');
+	assert.match(harness.guidanceSection(agent).text(), /COMPLEX/, 'planner guidance must survive');
 });
 
 test('a human prompt may still move a complex agent back to simple', async () => {
@@ -844,7 +1024,7 @@ test('a human prompt may still move a complex agent back to simple', async () =>
 	harness.nextVerdict = '{"difficulty":"simple"}';
 	await harness.preStep(agent, [userMessage('m2', 'thanks, now rename this variable')]);
 	assert.deepEqual(harness.routes(agent), [['strong-p', 'strong-m'], ['fast-p', 'fast-m']]);
-	assert.equal(harness.section(agent)[0].spec.text(), '', 'guidance stands down with the mode');
+	assert.equal(harness.guidanceSection(agent).text(), '', 'guidance stands down with the mode');
 });
 
 test('a follow-up is classified with recent conversation and the current mode', async () => {
@@ -890,7 +1070,7 @@ test('a failed classification keeps an ongoing complex task on the primary route
 	await harness.preStep(agent, [userMessage('m2', '继续')]);
 	assert.deepEqual(agent.model.current(), { provider: 'strong-p', model: 'strong-m' });
 	assert.deepEqual(harness.routes(agent), [['strong-p', 'strong-m']], 'a failure must not select aux');
-	assert.match(harness.section(agent)[0].spec.text(), /COMPLEX/, 'planner guidance must survive');
+	assert.match(harness.guidanceSection(agent).text(), /COMPLEX/, 'planner guidance must survive');
 });
 
 test('a failed classification leaves a new session on the cheap route', async () => {
@@ -1053,9 +1233,9 @@ test('a manual pick gets the planner guidance and the router\'s route', async ()
 		selection: { provider: 'manual-p', model: 'manual-m' },
 	});
 	await harness.preStep(manual, [userMessage('m1', 'deep work')]);
-	const section = harness.section(manual)[0];
+	const section = harness.guidanceSection(manual);
 	assert.ok(section);
-	assert.notEqual(section.spec.text(), '', 'the router keeps owning the prompt while it is on');
+	assert.notEqual(section.text(), '', 'the router keeps owning the prompt while it is on');
 	assert.deepEqual(harness.routes(manual), [['strong-p', 'strong-m']]);
 });
 
@@ -1227,7 +1407,7 @@ test('agent/disposed releases the section and forgets the session', async () => 
 	apply(harness.ctx(), CONFIG);
 	const agent = harness.agent({ id: 'a1', session: { header: {} } });
 	await harness.preStep(agent, [userMessage('m1', 'deep work')]);
-	assert.equal(harness.section(agent).length, 1);
+	assert.equal(harness.section(agent).length, 2);
 
 	harness.emitDisposed(agent);
 	assert.equal(harness.section(agent).length, 0, 'the agent-scoped section must be released');

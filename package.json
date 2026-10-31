@@ -1,6 +1,6 @@
 {
   "name": "dsh-dual-model-router",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "description": "Dual-model auto router for DeepSeek Harness: a fast auxiliary model classifies each task in the context of the conversation and handles simple ones; complex tasks are planned by the strong primary model and executed by auxiliary-model subagents.",

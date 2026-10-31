@@ -189,8 +189,20 @@ simple route or a subagent, blue for an auto complex route.
 Settings → **Dual-Model Router** (双模型路由): enable toggle, the effective
 toggle shortcut, primary/auxiliary model pickers with per-model
 reasoning-effort pickers (from the live provider catalog), complex keywords,
-classifier timeout, and the planner-guidance switch. Saving goes through
-`ctx.configEditor` and hot-applies via HMR.
+classifier timeout, the planner-guidance switch, and the extra-instructions
+box. Saving goes through `ctx.configEditor` and hot-applies via HMR.
+
+**Extra instructions** (`extraPrompt`, up to 8000 characters, trimmed) is a
+free-text box for your own guidance to the planning model — the typical use is
+telling it how to delegate, e.g. that a subtask which builds on conclusions
+already reached in this conversation should be dispatched to the
+context-inheriting subagent tool, while an independent subtask needs a fresh
+one. It is injected **only while the router is on and the task is classified as
+complex**, and **only into a root agent's system prompt** — as its own section
+immediately after the planner guidance, never into the user message, so the
+conversation log, the classifier's context window, and the routing indicator
+are untouched. It is independent of the planner-guidance switch (that switch
+owns the built-in text), and an empty box injects nothing.
 
 Each route's `reasoningEffort` is optional (`off/low/medium/high/max` where the
 model supports it); unset means the model's own default. The classifier call
@@ -224,6 +236,11 @@ Row `dual-model-router` in the profile's `cordis.patch.yml`:
     aux: { provider: giends4f-remote, model: DeepSeek-V4-Flash }
     classifierTimeoutMs: 15000
     plannerGuidance: true
+    # free text injected into the primary model's system prompt for complex
+    # tasks (root agent only); empty means inject nothing
+    extraPrompt: ""
+    complexKeywords:
+      - hard
 ```
 
 ## Test
