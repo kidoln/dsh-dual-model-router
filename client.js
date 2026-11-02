@@ -41,7 +41,8 @@ window.__ModuleLoader__.load({
 			nav: 'Dual-Model Router',
 			title: 'Dual-Model Router',
 			description: 'A fast auxiliary model classifies every task and handles simple ones directly; complex tasks are planned by the strong primary model and executed by auxiliary-model subagents.',
-			enabledLabel: 'Enable automatic model switching',
+			enabledLabel: 'Enable automatic routing by default for new conversations',
+			enabledHint: 'Each conversation has its own switch at the composer, next to the model. This checkbox is only the default a conversation starts from: once you flip that conversation\'s switch by hand, that conversation follows its own choice and ignores this one.',
 			primaryLabel: 'Primary model (strong · plans complex tasks)',
 			auxLabel: 'Auxiliary model (fast · classifies, executes, answers simple tasks)',
 			timeoutLabel: 'Classifier timeout (ms)',
@@ -60,7 +61,7 @@ window.__ModuleLoader__.load({
 			loading: 'Loading…',
 			loadFailed: 'Could not read the plugin configuration.',
 			hintTitle: 'How it works',
-			hintBody: 'Every new message is first classified by the auxiliary model. Simple tasks run entirely on the auxiliary model; complex tasks are planned by the primary model, which delegates execution steps to subagents running on the auxiliary model. While this is on, the composer\'s model control is locked and shows the model the router is using, and any model you pick yourself through the /model command is taken over at the next step: the switch below is the only way to drive a conversation with a model of your own.',
+			hintBody: 'Every new message is first classified by the auxiliary model. Simple tasks run entirely on the auxiliary model; complex tasks are planned by the primary model, which delegates execution steps to subagents running on the auxiliary model. The switch is per conversation: the control at the composer flips only the conversation it sits in, and while it is on that conversation\'s model control is locked and shows the model the router is using, so any model you pick yourself through the /model command is taken over at the next step. Switch it off (here or at the composer) to drive a conversation with a model of your own.',
 			unconfigured: 'Pick both models before enabling.',
 			notSet: '(not configured)',
 			shortcutLabel: 'Toggle shortcut',
@@ -73,7 +74,8 @@ window.__ModuleLoader__.load({
 			nav: '双模型路由',
 			title: '双模型智能路由',
 			description: '辅助（快）模型负责判别每个任务并直接完成简单任务；复杂任务由主（强）模型规划，执行步骤交给运行在辅助模型上的子智能体。',
-			enabledLabel: '启用自动模型切换',
+			enabledLabel: '新会话默认开启自动路由',
+			enabledHint: '每个对话在输入框旁（模型控件旁边）都有自己的开关。这里只是新对话的默认值：一旦你在某个对话里手动切换过，该对话就只跟随自己的设置，不再受这里影响。',
 			primaryLabel: '主模型（强 · 规划复杂任务）',
 			auxLabel: '辅助模型（快 · 判别 / 执行 / 简单任务）',
 			timeoutLabel: '判别超时（毫秒）',
@@ -92,7 +94,7 @@ window.__ModuleLoader__.load({
 			loading: '加载中…',
 			loadFailed: '读取插件配置失败。',
 			hintTitle: '工作方式',
-			hintBody: '每条新消息先由辅助模型判别难度：简单任务全程走辅助模型；复杂任务由主模型规划，并把执行步骤委派给运行在辅助模型上的子智能体。开启后输入框下方的模型控件被锁定，只显示路由当前使用的模型；会话中通过 /model 选择的模型会在下一步被自动路由接管，关闭自动路由才能用自己的模型驱动本对话。',
+			hintBody: '每条新消息先由辅助模型判别难度：简单任务全程走辅助模型；复杂任务由主模型规划，并把执行步骤委派给运行在辅助模型上的子智能体。开关是按对话生效的：输入框旁的开关只改变它所在的那个对话；开启期间该对话的模型控件被锁定，只显示路由当前使用的模型，通过 /model 选择的模型也会在下一步被接管。关掉它（在这里或在输入框旁）就能用自己的模型驱动这个对话。',
 			unconfigured: '启用前请先选择两个模型。',
 			notSet: '（未配置）',
 			shortcutLabel: '开关快捷键',
@@ -105,10 +107,10 @@ window.__ModuleLoader__.load({
 			/** The dot alone carries the on/off state; the label stays constant. */
 			pillLabel: 'Auto routing',
 			pillBusy: 'Switching…',
-			pillOnTitle: 'Dual-model routing is ON. Click, or press {keys}, to switch it off.',
-			pillOffTitle: 'Dual-model routing is OFF. Click, or press {keys}, to switch it on.',
-			pillOnTitleNoKeys: 'Dual-model routing is ON. Click to switch it off.',
-			pillOffTitleNoKeys: 'Dual-model routing is OFF. Click to switch it on.',
+			pillOnTitle: 'Dual-model routing is ON in THIS conversation. Click, or press {keys}, to switch it off.',
+			pillOffTitle: 'Dual-model routing is OFF in THIS conversation. Click, or press {keys}, to switch it on.',
+			pillOnTitleNoKeys: 'Dual-model routing is ON in THIS conversation. Click to switch it off.',
+			pillOffTitleNoKeys: 'Dual-model routing is OFF in THIS conversation. Click to switch it on.',
 			pillFailed: 'Could not switch dual-model routing: {error}',
 			seatAutoTitle: 'Dual-model routing is driving this conversation: the current request uses {model} ({mode} task). The composer model control follows the router, and a model picked through /model is taken over too; switch the router off to choose a model yourself.',
 			modeComplex: 'complex',
@@ -118,10 +120,10 @@ window.__ModuleLoader__.load({
 		const ZH_ROUTER = {
 			pillLabel: '自动路由',
 			pillBusy: '切换中…',
-			pillOnTitle: '双模型路由已开启。点击或按 {keys} 关闭。',
-			pillOffTitle: '双模型路由已关闭。点击或按 {keys} 开启。',
-			pillOnTitleNoKeys: '双模型路由已开启。点击关闭。',
-			pillOffTitleNoKeys: '双模型路由已关闭。点击开启。',
+			pillOnTitle: '本对话的双模型路由已开启。点击或按 {keys} 关闭。',
+			pillOffTitle: '本对话的双模型路由已关闭。点击或按 {keys} 开启。',
+			pillOnTitleNoKeys: '本对话的双模型路由已开启。点击关闭。',
+			pillOffTitleNoKeys: '本对话的双模型路由已关闭。点击开启。',
 			pillFailed: '切换双模型路由失败：{error}',
 			seatAutoTitle: '双模型路由正在驱动本对话：当前请求使用 {model}（{mode}任务）。此处模型控件由路由接管，/model 选择的模型同样会被接管；关闭路由后即可自行选择模型。',
 			modeComplex: '复杂',
@@ -179,6 +181,7 @@ window.__ModuleLoader__.load({
 		const EMPTY_SESSION = Object.freeze({
 			ready: false,
 			enabled: undefined,
+			defaultEnabled: undefined,
 			primary: null,
 			aux: null,
 			status: null,
@@ -187,14 +190,19 @@ window.__ModuleLoader__.load({
 		/**
 		 * One SSE connection per live conversation, shared by every surface of
 		 * this plugin (the composer pill, the model seat, the routing pill).
-		 * Frames carry the applied config, so a toggle made anywhere — the
-		 * shortcut, the pill, the settings page, another browser tab — reaches
-		 * every surface as soon as the host re-applies and the stream reconnects.
+		 * Frames carry the conversation's own switch next to the applied config, so
+		 * a toggle made anywhere — the shortcut, the pill, the settings page,
+		 * another browser tab — reaches every surface of that conversation as soon
+		 * as the host answers or re-applies.
 		 */
 		function createSessionHub() {
 			const values = new Map();
 			const listeners = new Map();
+			/** Listeners of EVERY conversation: the global surfaces read one session. */
+			const anyListeners = new Set();
 			const sources = new Map();
+			/** Conversations a JSON state read is already in flight for. */
+			const priming = new Set();
 
 			const stateOf = (sessionId) => values.get(sessionId) ?? EMPTY_SESSION;
 
@@ -210,19 +218,32 @@ window.__ModuleLoader__.load({
 				}
 			};
 
+			const notifyAny = (sessionId) => {
+				for (const listener of [...anyListeners]) {
+					try {
+						listener(sessionId);
+					} catch {
+						// a global surface that throws must not stop the state from landing
+					}
+				}
+			};
+
 			const patch = (sessionId, next) => {
 				values.set(sessionId, { ...stateOf(sessionId), ...next });
 				notify(sessionId);
+				notifyAny(sessionId);
 			};
 
 			const applyFrame = (sessionId, frame) => {
 				if (frame?.type === 'init') {
-					// the global switch first: the model seat reacts to it
-					setRouterEnabled(frame.enabled);
 					adoptClassifierBudget(frame);
+					// the profile default travels with every frame, so a page learns it
+					// from whichever conversation reports first
+					adoptDefault(frame);
 					patch(sessionId, {
 						ready: true,
 						enabled: frame.enabled === true,
+						defaultEnabled: typeof frame.defaultEnabled === 'boolean' ? frame.defaultEnabled : undefined,
 						primary: frame.primary ?? null,
 						aux: frame.aux ?? null,
 						status: frame.status ?? null,
@@ -264,9 +285,44 @@ window.__ModuleLoader__.load({
 
 			return {
 				stateOf,
-				/** Optimistic local flip while the host round-trip settles. */
-				patchAll(next) {
-					for (const sessionId of [...values.keys()]) patch(sessionId, next);
+				/** Record one conversation's state locally (the optimistic flip). */
+				patch,
+				/**
+				 * Observe every conversation's state, not one: the model-seat takeover
+				 * is a single registration shared by all composers, so it must follow
+				 * whichever conversation is active now.
+				 */
+				subscribeAny(listener) {
+					anyListeners.add(listener);
+					return () => {
+						anyListeners.delete(listener);
+					};
+				},
+				/**
+				 * Read one conversation's state without opening its stream.
+				 *
+				 * The takeover decision has to be made the moment a conversation becomes
+				 * active; waiting for an EventSource handshake would flash the shipped
+				 * model selector in every conversation that already had the router on.
+				 * One JSON read per conversation, skipped once any frame has arrived.
+				 */
+				prime(sessionId) {
+					if (sessionId === undefined || priming.has(sessionId) || stateOf(sessionId).ready === true) return;
+					priming.add(sessionId);
+					Promise.resolve()
+						.then(() => fetch(`${STATUS_ENDPOINT}?session=${encodeURIComponent(sessionId)}`, {
+							cache: 'no-store',
+							headers: { accept: 'application/json' },
+						}))
+						.then((response) => (response.ok ? response.json() : null))
+						.then((frame) => {
+							// the JSON snapshot is an init frame without the envelope
+							if (frame !== null && frame !== undefined) applyFrame(sessionId, { type: 'init', ...frame });
+						})
+						.catch(() => {
+							// offline or unauthenticated: the stream still reports the truth
+						})
+						.finally(() => priming.delete(sessionId));
 				},
 				subscribe(sessionId, listener) {
 					let group = listeners.get(sessionId);
@@ -291,8 +347,88 @@ window.__ModuleLoader__.load({
 
 		const hub = createSessionHub();
 
-		/** Config-level switch, known before any conversation reports one. */
-		const routerEnabled = { value: undefined, listeners: new Set() };
+		/**
+		 * The profile row's default switch, learned without waiting for a
+		 * conversation. It is only the fallback for a conversation this page has
+		 * never seen (see `routeGateEnabled`), never the answer for one it has.
+		 */
+		let routerDefaultEnabled;
+
+		/** Adopt the profile default a status frame reports, if it carries one. */
+		const adoptDefault = (frame) => {
+			if (typeof frame?.defaultEnabled === 'boolean') routerDefaultEnabled = frame.defaultEnabled;
+			else if (typeof frame?.enabled === 'boolean') routerDefaultEnabled = frame.enabled;
+		};
+
+		/**
+		 * The conversation the user is working in.
+		 *
+		 * The composer pill and the routing detail are rendered per conversation and
+		 * therefore know their own session; the model-seat takeover is ONE global
+		 * registration that shadows the shipped selector in every composer at once,
+		 * so it has to follow a single conversation. Focus — or a pointer press, or a
+		 * send — inside a `[data-conversation-session]` container elects that
+		 * conversation, and a page showing exactly one conversation elects it without
+		 * any interaction.
+		 */
+		const activeSession = { value: undefined, listeners: new Set() };
+
+		function setActiveSession(sessionId) {
+			if (typeof sessionId !== 'string' || sessionId.length === 0) return;
+			if (activeSession.value === sessionId) return;
+			activeSession.value = sessionId;
+			for (const listener of [...activeSession.listeners]) {
+				try {
+					listener(sessionId);
+				} catch {
+					// a broken listener must not stop the election from landing
+				}
+			}
+		}
+
+		const subscribeActiveSession = (listener) => {
+			activeSession.listeners.add(listener);
+			return () => {
+				activeSession.listeners.delete(listener);
+			};
+		};
+
+		/**
+		 * Whether this router CONFIRMED drives one conversation. `undefined` (no frame
+		 * yet) is not a yes: the seat is only taken over on a confirmed switch, so a
+		 * cold page never hides the shipped selector behind a guess.
+		 */
+		const enabledForSession = (sessionId) => hub.stateOf(sessionId).enabled === true;
+
+		/** Whether the page currently renders one conversation's container. */
+		function isConversationOnScreen(sessionId) {
+			const doc = typeof document === 'undefined' ? undefined : document;
+			if (typeof doc?.querySelectorAll !== 'function') return false;
+			try {
+				return [...doc.querySelectorAll('[data-conversation-session]')]
+					.some((node) => node?.getAttribute?.('data-conversation-session') === sessionId);
+			} catch {
+				return false;
+			}
+		}
+
+		/**
+		 * Whether a send should be held for the classification round trip.
+		 *
+		 * A conversation whose own switch is known answers for itself. One the page
+		 * has never seen — a session with no composer mounted, a programmatic
+		 * `sendSession` — falls back to the profile default, which is the same gate
+		 * this used before the switch became per conversation; the host answers
+		 * `kind: 'off'` without spending a model call when that conversation turns
+		 * out to be switched off, so the fallback costs one round trip at worst.
+		 */
+		const routeGateEnabled = (sessionId) => {
+			const state = hub.stateOf(sessionId);
+			return state.ready === true ? state.enabled === true : routerDefaultEnabled === true;
+		};
+
+		/** Whether the conversation the global surfaces follow has the router on. */
+		const activeSessionEnabled = () => enabledForSession(activeSession.value);
 
 		/**
 		 * How long a send may be held for the routing round trip. It follows the
@@ -309,27 +445,6 @@ window.__ModuleLoader__.load({
 			if (typeof budget !== 'number' || !Number.isFinite(budget) || budget <= 0) return;
 			routeWaitMs = Math.min(ROUTE_WAIT_MAX_MS, Math.max(ROUTE_WAIT_MIN_MS, budget + ROUTE_WAIT_SLACK_MS));
 		}
-
-		function setRouterEnabled(value) {
-			if (typeof value !== 'boolean') return;
-			if (routerEnabled.value === value) return;
-			routerEnabled.value = value;
-			for (const listener of [...routerEnabled.listeners]) {
-				try {
-					listener();
-				} catch {
-					// a broken listener must not stop the switch from landing
-				}
-			}
-		}
-
-		const subscribeRouterEnabled = (listener) => {
-			routerEnabled.listeners.add(listener);
-			return () => {
-				routerEnabled.listeners.delete(listener);
-			};
-		};
-		const snapshotRouterEnabled = () => routerEnabled.value;
 
 		/** Effective keycaps of the toggle command, published by the shortcut effect. */
 		const shortcutKeys = { value: [], listeners: new Set() };
@@ -511,8 +626,12 @@ window.__ModuleLoader__.load({
 			return model;
 		};
 
-		/** Read the applied config without waiting for a conversation (JSON snapshot). */
-		async function refreshRouterState() {
+		/**
+		 * Read the profile default without waiting for a conversation (JSON
+		 * snapshot). Only the settings surfaces need it: every conversation learns
+		 * its OWN switch from that conversation's frames.
+		 */
+		async function refreshDefaultState() {
 			try {
 				const response = await fetch(STATUS_ENDPOINT, {
 					cache: 'no-store',
@@ -520,43 +639,64 @@ window.__ModuleLoader__.load({
 				});
 				if (!response.ok) return;
 				const frame = await response.json();
-				setRouterEnabled(frame?.enabled);
+				if (frame !== null && typeof frame === 'object') adoptDefault(frame);
 				adoptClassifierBudget(frame);
 			} catch {
-				// offline or unauthenticated: the SSE frames still carry the switch
-			} finally {
-				// The composer switch is resident, so an unknown state must still
-				// render: "off" is its safe face (no seat takeover) until a frame
-				// or a click reports the truth.
-				if (snapshotRouterEnabled() === undefined) setRouterEnabled(false);
+				// offline or unauthenticated: the conversation frames still carry it
 			}
 		}
 
-		let toggleInFlight = null;
+		/**
+		 * Flip ONE conversation's switch through the host; resolves to the new state.
+		 *
+		 * The desired state travels with the request instead of being inferred by the
+		 * host: a surface whose frame is a beat behind would otherwise flip the
+		 * conversation the wrong way, and two tabs toggling at once would race.
+		 * @param sessionId - the conversation to flip. Without one the profile
+		 *   default is flipped instead, which is what an API caller gets.
+		 */
+		const togglesInFlight = new Map();
 
-		/** Flip the router through the host row; resolves to the new state. */
-		function toggleRouter() {
-			if (toggleInFlight !== null) return toggleInFlight;
-			toggleInFlight = (async () => {
+		function toggleRouter(sessionId) {
+			const key = typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : '';
+			if (togglesInFlight.has(key)) return togglesInFlight.get(key);
+			const current = key === '' ? undefined : hub.stateOf(key).enabled;
+			const body = { enabled: current !== true };
+			if (key !== '') body.sessionId = key;
+			const pending = (async () => {
 				try {
 					const response = await fetch(TOGGLE_ENDPOINT, {
 						method: 'POST',
 						headers: { 'content-type': 'application/json' },
-						body: '{}',
+						body: JSON.stringify(body),
 					});
 					const payload = await response.json().catch(() => null);
 					if (payload?.ok !== true || typeof payload.enabled !== 'boolean') {
 						throw new Error(String(payload?.error ?? `HTTP ${response.status}`));
 					}
-					setRouterEnabled(payload.enabled);
-					hub.patchAll({ enabled: payload.enabled });
-					void refreshRouterState();
+					// Optimistic, and only for the conversation that was flipped: the
+					// host's own frame for it follows immediately. A flip of the profile
+					// DEFAULT patches nothing locally — it re-applies the host, every
+					// stream reconnects, and conversations carrying an override must keep it.
+					if (key !== '') hub.patch(key, { ready: true, enabled: payload.enabled });
 					return payload.enabled;
 				} finally {
-					toggleInFlight = null;
+					togglesInFlight.delete(key);
 				}
 			})();
-			return toggleInFlight;
+			togglesInFlight.set(key, pending);
+			return pending;
+		}
+
+		/** The conversation a DOM node belongs to, if the node sits inside one. */
+		function sessionIdOfNode(node) {
+			try {
+				const holder = typeof node?.closest === 'function' ? node.closest('[data-conversation-session]') : null;
+				const found = holder?.getAttribute?.('data-conversation-session');
+				return typeof found === 'string' && found.length > 0 ? found : undefined;
+			} catch {
+				return undefined;
+			}
 		}
 
 		/** Resolve the conversation a surface renders in, with a DOM fallback. */
@@ -564,11 +704,8 @@ window.__ModuleLoader__.load({
 			const [sniffed, setSniffed] = _react.useState(undefined);
 			_react.useEffect(() => {
 				if (sessionIdProp !== undefined) return undefined;
-				const node = nodeRef.current;
-				const found = typeof node?.closest === 'function'
-					? node.closest('[data-conversation-session]')?.getAttribute('data-conversation-session')
-					: undefined;
-				if (found !== undefined && found !== null) setSniffed((current) => (current === found ? current : found));
+				const found = sessionIdOfNode(nodeRef.current);
+				if (found !== undefined) setSniffed((current) => (current === found ? current : found));
 				return undefined;
 			});
 			return sessionIdProp ?? sniffed;
@@ -645,16 +782,16 @@ window.__ModuleLoader__.load({
 		//#endregion
 		//#region client/status-pill.mjs
 		/**
-		 * Resident on/off switch at the left of the composer's model seat: the
-		 * same control the config flag drives, so it is never out of date with
-		 * what the router does.
+		 * Resident on/off switch at the left of the composer's model seat. It drives
+		 * THIS conversation's switch — the profile row is only the default a
+		 * conversation starts from — so two conversations never drag each other on
+		 * and off.
 		 */
 		function RouterStatusPill({ sessionId: sessionIdProp }) {
 			const t = routerCopy();
 			const nodeRef = _react.useRef(null);
 			const sessionId = useSessionId(sessionIdProp, nodeRef);
 			const session = useSessionState(sessionId);
-			const globalEnabled = useSyncStore(subscribeRouterEnabled, snapshotRouterEnabled);
 			const keys = useSyncStore(subscribeShortcutKeys, snapshotShortcutKeys);
 			const [pending, setPending] = _react.useState(false);
 			const [failure, setFailure] = _react.useState(null);
@@ -663,13 +800,14 @@ window.__ModuleLoader__.load({
 				if (failureTimer.current !== null) clearTimeout(failureTimer.current);
 			}, []);
 
-			const enabled = globalEnabled === undefined ? session.enabled : globalEnabled;
+			const enabled = session.enabled;
 
 			const toggle = () => {
 				if (pending) return;
+				if (typeof sessionId === 'string' && sessionId.length > 0) setActiveSession(sessionId);
 				setPending(true);
 				setFailure(null);
-				toggleRouter()
+				toggleRouter(sessionId)
 					.catch((error) => {
 						setFailure(String(error?.message ?? error));
 						// one live timer: a second failure must not be cleared early
@@ -785,8 +923,7 @@ window.__ModuleLoader__.load({
 			const sessionId = useSessionId(sessionIdProp, nodeRef);
 			const session = useSessionState(sessionId);
 			const groups = useSessionGroups(sessionId);
-			const globalEnabled = useSyncStore(subscribeRouterEnabled, snapshotRouterEnabled);
-			const enabled = globalEnabled === undefined ? session.enabled : globalEnabled;
+			const enabled = session.enabled;
 			const status = session.status;
 
 			if (enabled !== true || status === null || status === undefined) return null;
@@ -952,7 +1089,8 @@ window.__ModuleLoader__.load({
 					});
 					const payload = await response.json().catch(() => null);
 					if (payload?.ok === true) {
-						setRouterEnabled(enabled);
+						// the save re-applies the plugin, which closes every open status
+						// stream: each conversation reconnects and re-reads its own switch
 						setStatus('saved');
 					} else {
 						setStatus(`error:${payload?.error ?? response.status}`);
@@ -1022,6 +1160,7 @@ window.__ModuleLoader__.load({
 					resize: 'vertical',
 				},
 				extraPromptHint: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary, #666)' },
+				enabledHint: { margin: 0, fontSize: '12px', color: 'var(--dsw-alias-label-secondary, #666)' },
 			};
 
 			return h('div', { style: styles.page },
@@ -1031,6 +1170,7 @@ window.__ModuleLoader__.load({
 					h('label', { style: styles.checkRow },
 						h('input', { type: 'checkbox', checked: enabled, onChange: (event) => setEnabled(event.target.checked) }),
 						h('span', { style: { fontWeight: 500 } }, t.enabledLabel)),
+					h('p', { style: styles.enabledHint }, t.enabledHint),
 					h('div', { style: styles.shortcutRow },
 						h('span', { style: { fontSize: '13px', fontWeight: 500 } }, t.shortcutLabel),
 						h('span', { style: styles.shortcutKey }, keycapTextOf(keys) !== '' ? keycapTextOf(keys) : t.shortcutUnbound),
@@ -1155,8 +1295,18 @@ window.__ModuleLoader__.load({
 		 * routes from the next step on.
 		 */
 		async function routeBeforeSend(sessionId, text) {
-			if (snapshotRouterEnabled() !== true) return;
 			if (typeof sessionId !== 'string' || sessionId.length === 0) return;
+			// A send the user typed into the conversation on screen is a stronger hint
+			// than focus; a programmatic send to a conversation that is NOT rendered
+			// (another session's prompt, a background delivery) must not drag the
+			// global surfaces — the model-seat takeover — onto that conversation.
+			if (isConversationOnScreen(sessionId)) setActiveSession(sessionId);
+			// THIS conversation's switch, not the profile default: a conversation the
+			// user switched off must not pay a classification round trip, and one
+			// switched on by hand must get its first step routed even when the
+			// default is off. A conversation this page has never seen falls back to
+			// the profile default (see `routeGateEnabled`).
+			if (!routeGateEnabled(sessionId)) return;
 			if (typeof text !== 'string' || text.trim().length === 0) return;
 			const controller = new AbortController();
 			const timer = setTimeout(() => controller.abort(), routeWaitMs);
@@ -1261,9 +1411,63 @@ window.__ModuleLoader__.load({
 			// without it (or a client build without that service) simply keeps the
 			// pre-step fallback.
 			installPromptRouting(ctx);
-			// Seed the switch before any conversation subscribes, so a page that
-			// boots with the router on never flashes the shipped model selector.
-			void refreshRouterState();
+			// Read the profile default (classifier budget, settings surfaces) without
+			// waiting for a conversation. Each conversation's own switch arrives with
+			// its stream, primed as soon as the conversation becomes active.
+			void refreshDefaultState();
+
+			// Which conversation the global surfaces follow. The DOM is the only
+			// authority available to a client plugin: the renderer's containers carry
+			// `data-conversation-session`, which is exactly how the shipped stop
+			// shortcut finds the conversation a key event belongs to.
+			ctx.effect(() => {
+				const doc = typeof document === 'undefined' ? undefined : document;
+				if (doc === undefined || typeof doc.addEventListener !== 'function') return () => {};
+				const sniff = (event) => {
+					const target = event?.target;
+					const holder = typeof target?.closest === 'function' ? target.closest('[data-conversation-session]') : null;
+					const found = holder?.getAttribute?.('data-conversation-session');
+					if (typeof found === 'string') setActiveSession(found);
+				};
+				doc.addEventListener('focusin', sniff, true);
+				doc.addEventListener('pointerdown', sniff, true);
+				// A page showing exactly one conversation needs no interaction to elect
+				// it. Retried briefly: this plugin applies before the conversation
+				// mounts, and the composer appears a moment later.
+				let timer = null;
+				let attempts = 0;
+				const seed = () => {
+					timer = null;
+					if (activeSession.value !== undefined) return;
+					const holders = typeof doc.querySelectorAll === 'function'
+						? doc.querySelectorAll('[data-conversation-session]')
+						: [];
+					if (holders.length === 1) {
+						const found = holders[0]?.getAttribute?.('data-conversation-session');
+						if (typeof found === 'string') setActiveSession(found);
+						return;
+					}
+					if (attempts < 20) {
+						attempts += 1;
+						timer = setTimeout(seed, 500);
+					}
+				};
+				seed();
+				return () => {
+					doc.removeEventListener('focusin', sniff, true);
+					doc.removeEventListener('pointerdown', sniff, true);
+					if (timer !== null) clearTimeout(timer);
+				};
+			}, 'dsh-dual-model-router: active conversation');
+
+			// The active conversation's state is what the seat follows, so ask for it
+			// as soon as one is elected — including the one the seed above just
+			// elected, which happened before this listener existed.
+			ctx.effect(() => {
+				const off = subscribeActiveSession((sessionId) => hub.prime(sessionId));
+				hub.prime(activeSession.value);
+				return off;
+			}, 'dsh-dual-model-router: active conversation state');
 
 			ctx.effect(() => () => {
 				modelDirectories = undefined;
@@ -1333,10 +1537,21 @@ window.__ModuleLoader__.load({
 							defaults: SHORTCUT_DEFAULTS,
 							regions: ['page', 'editable'],
 							modals: [],
-							resolve: () => ({
-								status: 'handled',
-								run: () => { void toggleRouter().catch(() => {}); },
-							}),
+							resolve: (context) => {
+								// The command is page-wide, so the conversation comes from the input
+								// element the key event arrived on (a native menu activation carries
+								// none) and falls back to the active conversation. With neither, the
+								// key is not consumed: swallowing it would hide a dead command.
+								const sessionId = sessionIdOfNode(context?.target) ?? activeSession.value;
+								if (sessionId === undefined) return { status: 'pass' };
+								return {
+									status: 'handled',
+									run: () => {
+										setActiveSession(sessionId);
+										void toggleRouter(sessionId).catch(() => {});
+									},
+								};
+							},
 						});
 					} catch (error) {
 						// a taken default binding must not take the plugin down:
@@ -1387,8 +1602,13 @@ window.__ModuleLoader__.load({
 			// Model seat takeover: while the router is on, the shipped selector
 			// is shadowed by this plugin's read-only model display. The entry is
 			// installed only while the switch is on, so turning it off restores
-			// the shipped selector without a reload.
+			// the shipped selector without a reload — and now only while the
+			// conversation the user is in has it on, since one registration shadows
+			// the selector in every composer at once.
 			const seat = { live: false, held: null, timer: null, attempts: 0, probe: null };
+
+			/** Re-evaluate the takeover against the conversation that is active NOW. */
+			const syncSeatNow = () => syncSeat(activeSessionEnabled());
 
 			const clearSeatTimer = () => {
 				if (seat.timer === null) return;
@@ -1465,7 +1685,7 @@ window.__ModuleLoader__.load({
 						seat.attempts += 1;
 						seat.timer = setTimeout(() => {
 							seat.timer = null;
-							syncSeat(routerEnabled.value === true);
+							syncSeatNow();
 						}, 500);
 					}
 					reportSeat(`waiting live=0 attempts=${seat.attempts}`);
@@ -1490,9 +1710,14 @@ window.__ModuleLoader__.load({
 				reportSeat(`failed ${String(failure?.message ?? failure).slice(0, 120)}`);
 			};
 			ctx.effect(() => {
-				const off = subscribeRouterEnabled(() => syncSeat(routerEnabled.value));
+				// two triggers: the active conversation changes, or the state of the
+				// conversation that is active changes (a toggle anywhere, a frame from
+				// the host, another tab)
+				const offActive = subscribeActiveSession(syncSeatNow);
+				const offAny = hub.subscribeAny(syncSeatNow);
 				return () => {
-					off();
+					offActive();
+					offAny();
 					releaseSeat();
 				};
 			}, 'dsh-dual-model-router: model seat switch');
@@ -1501,7 +1726,7 @@ window.__ModuleLoader__.load({
 					return ctx.slots.inject('conversation.input.model', () => {
 						seat.live = true;
 						seat.attempts = 0;
-						syncSeat(routerEnabled.value);
+						syncSeatNow();
 						return () => {
 							seat.live = false;
 							releaseSeat();

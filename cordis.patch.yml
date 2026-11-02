@@ -1,5 +1,7 @@
 # dsh-dual-model-router — dual-model auto routing.
-# enabled=false by default; switch it on on the plugin's Settings page.
+# enabled=false is only the DEFAULT a conversation starts from: each conversation
+# has its own switch at the composer, and a conversation switched by hand keeps
+# its own choice (a subagent follows the conversation it was dispatched from).
 - insert:
     - id: dual-model-router
       name: dsh-dual-model-router

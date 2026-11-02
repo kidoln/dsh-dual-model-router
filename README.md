@@ -3,7 +3,10 @@
 Dual-model auto routing for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH).
 
 A fast **auxiliary model** and a strong **primary model** are configured on the
-plugin's Settings page. When enabled:
+plugin's Settings page. The switch is **per conversation**: the profile row's
+`enabled` is only the default a conversation starts from, and the composer's
+on/off pill flips that one conversation without touching the others or the
+profile. When a conversation's switch is on:
 
 1. A human **send** is held for one classification round trip: the browser half
    asks the host (`POST /api/dual-model-router/route`) to decide and record the
@@ -81,13 +84,32 @@ nothing was classified. A refusal is never fatal to the send, and the endpoint
 refuses nothing on account of the session's current model: while the router is
 on it routes every prompt.
 
-`POST /api/dual-model-router/toggle` flips `enabled` in the plugin row and
-answers `{ok, enabled}` — the one path the composer switch and the keyboard
-shortcut share. Turning the router on refuses `409` (`unknown model — …`) when a
-configured route does not resolve against the live provider catalog, so a typo
-cannot silently break routing. The settings page's Save applies the same check,
-but only when the save leaves the router on and either switches it on or edits a
-route — an unrelated field can still be edited while a route is broken.
+`POST /api/dual-model-router/toggle {"sessionId", "enabled"?}` is the one path
+the composer switch and the keyboard shortcut share. **With a `sessionId` it
+flips THAT conversation alone** — nothing is written to the profile, and the
+conversation keeps its choice (see [Per-conversation switch](#per-conversation-switch))
+— and answers `{ok, enabled, sessionId}`. Without one it flips the profile row's
+`enabled`, which is the default every conversation the user never touched
+follows, and answers `{ok, enabled}`. An empty body is legal in both cases: the
+endpoint's whole meaning is "flip", and a caller that only wants the opposite
+state has nothing to say. `enabled` may be sent explicitly, which is what the
+browser half does — a surface whose own frame is a beat behind would otherwise
+flip the conversation the wrong way, and two tabs toggling at once would race.
+
+Turning the router on — for one conversation or for the default — refuses `409`
+(`unknown model — …`) when a configured route does not resolve against the live
+provider catalog, so a typo cannot silently break routing. The settings page's
+Save applies the same check, but only when the save leaves the router on and
+either switches it on or edits a route — an unrelated field can still be edited
+while a route is broken.
+
+`GET /api/dual-model-router/status?session=<id>` (and the SSE stream for that
+conversation) answers the `init` frame
+`{type, enabled, defaultEnabled, primary, aux, classifierTimeoutMs, status}`:
+`enabled` is what **this** conversation does (its own switch, else the default),
+and `defaultEnabled` is the profile row's default on its own. A request without
+a `session` sees the default in `enabled` too, which is what the settings
+surfaces read.
 
 All six `/api/dual-model-router/*` routes gate themselves through the host
 `connection` service and fail closed: they need the same authenticated browser
@@ -103,12 +125,45 @@ Remote invocation and so bypass `remoteAccess`'s policy. The two read routes
 (`settings`, the SSE stream) accept any authenticated caller. All of them are
 method-checked (`405`).
 
-While the router is on it owns the session's model: a model chosen by hand
-(through `/model`, or by a client that pins one) is replaced by the router's own
-route at the next step boundary, so the on/off switch is the only way to drive a
-conversation with a model of your own. Classifier failures and timeouts keep the
+While the router is on in a conversation it owns that conversation's model: a
+model chosen by hand (through `/model`, or by a client that pins one) is replaced
+by the router's own route at the next step boundary, so that conversation's
+off switch is the only way to drive it with a model of your own. Classifier
+failures and timeouts keep the
 session's current mode: a new session stays `simple`, but an ongoing complex
 task is never dropped to the cheap route mid-task by a transient failure.
+
+## Per-conversation switch
+
+The switch is **per conversation, not global**. Concretely:
+
+- The profile row's `enabled` is the **default**: a conversation the user never
+  touched follows it, so editing the settings page still changes behaviour for
+  every conversation that was never switched by hand.
+- The composer pill and the keyboard shortcut flip **one conversation**. That
+  choice is absolute from then on: the conversation keeps it when the profile
+  default changes, when the plugin is re-applied (every Settings save), and after
+  a host restart.
+- **Subagents** have no switch of their own: a subagent follows the switch of the
+  conversation it was dispatched from (the parent chain is walked to the root),
+  because the pill the user sees belongs to that conversation.
+- The choices are durable host-side state, written with `node:fs` (the plugin
+  declares no dependency on a storage service, for the same reason it declares
+  no Loader Config schema — it is linked from outside the profile's
+  `node_modules`, where `@deepseek-ai/*` would not resolve) to
+  `<DSH_HOME>/dual-model-router/sessions.json`:
+
+  ```json
+  { "version": 1, "sessions": { "<sessionId>": { "enabled": true, "at": 1730000000000 } } }
+  ```
+
+  `DSH_HOME` is honoured, `~/.dsh` is the fallback, and
+  `DSH_DUAL_MODEL_ROUTER_STATE=<path>` overrides the whole file path (the test
+  suite points it at a throwaway file). The file is written atomically
+  (write-then-rename) and capped at 500 entries, oldest first — a bound so an
+  abandoned id cannot grow it forever, not an eviction policy a live
+  conversation is expected to hit. A write that fails (read-only home) costs
+  durability, never the toggle itself.
 
 ## Composer surfaces
 
@@ -118,20 +173,33 @@ Two surfaces sit in the composer tool row, under the input box:
   seat): always present while a conversation is live. The label stays a
   constant `自动路由` — the dot alone carries the state (green = on,
   grey = off, red = the last toggle failed; the tooltip says which). Clicking
-  it toggles, and the tooltip names the current shortcut — omitted on a profile
-  where the command is unbound (`web:linux`), so the sentence never breaks. It
-  reads the applied config over the status stream, so a change made anywhere —
-  shortcut, settings page, another tab — shows up here.
-- **Model seat** (`conversation.input.model`): **while the router is on, the
-  plugin shadows the shipped model selector** with a read-only display of the
-  model this conversation actually runs on. The label is the model catalog's
-  display name, resolved from the same per-session directory the shipped
-  selector reads, so it matches the name in the `/model` menu; a route the
-  catalog does not know yet falls back to the provider-owned id. The bare model
-  name is the normal case — every route is router-chosen, so no badge is shown.
-  Manual selection in the composer is impossible while the router is on, and a
-  pick made through `/model` is taken over the same way; turning the router off
-  restores the shipped selector, with no reload.
+  it toggles **this conversation only**, and the tooltip names the current
+  shortcut — omitted on a profile where the command is unbound (`web:linux`),
+  so the sentence never breaks. It reads that conversation's state over the
+  status stream, so a change made anywhere — shortcut, another tab, the host's
+  per-conversation switch — shows up here.
+- **Model seat** (`conversation.input.model`): **while the router is on in THIS
+  conversation, the plugin shadows the shipped model selector** with a
+  read-only display of the model this conversation actually runs on. The label
+  is the model catalog's display name, resolved from the same per-session
+  directory the shipped selector reads, so it matches the name in the `/model`
+  menu; a route the catalog does not know yet falls back to the provider-owned
+  id. The bare model name is the normal case — every route is router-chosen, so
+  no badge is shown. Manual selection in the composer is impossible while the
+  router is on in that conversation, and a pick made through `/model` is taken
+  over the same way; switching the router off restores the shipped selector,
+  with no reload.
+
+  The takeover is ONE registration that shadows the shipped selector in every
+  composer at once, so it can only follow one conversation at a time. The plugin
+  elects the **active conversation** from the DOM the same way the shipped stop
+  shortcut does: focus or pointer input inside a `[data-conversation-session]`
+  container elects it, a send from a conversation that is actually rendered
+  elects it, and a page showing exactly one conversation elects it with no
+  interaction. Until a conversation is confirmed to have the router on, the
+  shipped selector stays — a cold page never hides it behind a guess. Two
+  conversations side by side therefore show the auto seat in the one that was
+  focused (and has the router on) and the shipped selector in the other.
 
 Every surface that names a model — this seat and the routing line below the
 composer card, in every conversation including a subagent view — resolves it the
@@ -161,8 +229,9 @@ than what actually lands. The takeover still walks a short list of falling
 priorities (`-1, -2, -4, -8`) because a static registration could already hold
 one of them. The shipped entry stays registered but renders `active: false`;
 dropping the seat entry on the way off makes it the rendered entry again. The
-takeover is driven by the applied switch, so it follows a toggle from any
-surface and any tab.
+takeover is driven by the **active conversation's** switch — the election above,
+plus its state from the status stream or the one JSON read made when it is
+elected — so it follows a toggle from any surface and any tab.
 
 If the seat cannot attach while the router is on (a composer that arrives after
 the retry window, or an occupied priority), the plugin leaves an invisible
@@ -183,7 +252,10 @@ place.
 
 The command is `dual-model-router.toggle` ("Toggle dual-model routing" /
 "切换双模型路由"), works on the page and inside the composer, and is blocked
-while a modal is open. Like every editable command it appears in
+while a modal is open. It flips the conversation the key event came from (the
+focused element's `[data-conversation-session]` container), falling back to the
+active conversation; with neither, the key is not consumed rather than toggling
+something the user cannot see. Like every editable command it appears in
 **Settings → General → Shortcuts**, where the combination can be changed and
 conflicts are reported; the plugin's own settings page shows the effective
 keycaps.
@@ -191,8 +263,8 @@ keycaps.
 ## Routing indicator
 
 While enabled, a status pill renders below the composer card (right-aligned) for
-every live conversation, pushed over SSE from the router (`agent/pre-step`
-decisions and the prompt-time route alike):
+every live conversation whose own switch is on, pushed over SSE from the router
+(`agent/pre-step` decisions and the prompt-time route alike):
 
 - `辅助模型判别任务难度…` — the auxiliary model is classifying the new message
 - `简单任务 · 辅助模型 <model>` — the whole task runs on the auxiliary model
@@ -208,18 +280,23 @@ simple route or a subagent, blue for an auto complex route.
 
 ## Settings page
 
-Settings → **Dual-Model Router** (双模型路由): enable toggle, the effective
-toggle shortcut, primary/auxiliary model pickers with per-model
+Settings → **Dual-Model Router** (双模型路由): the default enable toggle, the
+effective toggle shortcut, primary/auxiliary model pickers with per-model
 reasoning-effort pickers (from the live provider catalog), complex keywords,
 classifier timeout, the planner-guidance switch, and the extra-instructions
 box. Saving goes through `ctx.configEditor` and hot-applies via HMR.
+
+The enable toggle is the **default for new conversations**, not a global
+switch: a conversation that was switched by hand from the composer keeps its own
+choice and ignores it. The page says so next to the checkbox.
 
 **Extra instructions** (`extraPrompt`, up to 8000 characters, trimmed) is a
 free-text box for your own guidance to the planning model — the typical use is
 telling it how to delegate, e.g. that a subtask which builds on conclusions
 already reached in this conversation should be dispatched to the
 context-inheriting subagent tool, while an independent subtask needs a fresh
-one. It is injected **only while the router is on and the task is classified as
+one. It is injected **only while the router is on in that conversation and the task
+is classified as
 complex**, and **only into a root agent's system prompt** — as its own section
 immediately after the planner guidance, never into the user message, so the
 conversation log, the classifier's context window, and the routing indicator
@@ -253,7 +330,7 @@ Row `dual-model-router` in the profile's `cordis.patch.yml`:
 - id: dual-model-router
   name: dsh-dual-model-router
   config:
-    enabled: false
+    enabled: false   # default for a conversation that was never switched by hand
     primary: { provider: zai-coding-cn, model: glm-5.3 }
     aux: { provider: giends4f-remote, model: DeepSeek-V4-Flash }
     classifierTimeoutMs: 15000
@@ -270,5 +347,8 @@ Row `dual-model-router` in the profile's `cordis.patch.yml`:
 ```bash
 cd /Users/kido/.dsh/plugins/dsh-dual-model-router && npm test
 ```
+
+The suite points `DSH_DUAL_MODEL_ROUTER_STATE` at a throwaway file, so a test run
+never reads or rewrites the per-conversation switches of the machine it runs on.
 
 MIT License.

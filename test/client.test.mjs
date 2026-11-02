@@ -43,7 +43,43 @@ function loadClient({ react: reactOverride } = {}) {
 }
 
 /**
- * A miniature hooks runtime: just enough to invoke one slot component in a
+ * A minimal DOM for the plugin's conversation tracking.
+ *
+ * The renderer marks each conversation container with
+ * `data-conversation-session`; the plugin elects the active conversation from
+ * focus/pointer input there (or from a page showing exactly one conversation).
+ * The model-seat takeover is a single registration shared by every composer, so
+ * without a conversation to follow it is never installed — which is why the
+ * seat tests need one on screen.
+ * @param sessionIds - the conversations currently rendered.
+ */
+function installDom(sessionIds = ['session-1']) {
+	const listeners = new Map();
+	const holders = sessionIds.map((sessionId) => ({
+		getAttribute: (name) => (name === 'data-conversation-session' ? sessionId : null),
+	}));
+	globalThis.document = {
+		documentElement: { lang: 'en' },
+		addEventListener(name, callback) { listeners.set(name, callback); },
+		removeEventListener(name) { listeners.delete(name); },
+		querySelectorAll: (selector) => (selector === '[data-conversation-session]' ? holders : []),
+	};
+	return {
+		holders,
+		/** Simulate focus/click input inside one conversation's container. */
+		focus(sessionId) {
+			for (const name of ['focusin', 'pointerdown']) {
+				const handler = listeners.get(name);
+				if (typeof handler === 'function') handler({ target: { closest: () => ({ getAttribute: () => sessionId }) } });
+			}
+		},
+	};
+}
+
+/** A host init frame, as the JSON status snapshot also spells it. */
+const initFrame = (enabled) => ({ type: 'init', enabled });
+
+/** A miniature hooks runtime: just enough to invoke one slot component in a
  * render pass and inspect the element tree it returns. Hook slots are stored by
  * call order, which is stable for these components across renders.
  */
@@ -221,7 +257,10 @@ const SHIPPED_SINGLE_PRIORITY = new Map([['conversation.input.model', 0]]);
 test('the client half registers every surface it owns', async () => {
 	const client = loadClient();
 	const harness = fakeContext();
-	await withFetch(() => ({ ok: true, json: async () => ({ enabled: true }) }), async () => {
+	// one conversation on screen: the plugin elects it as the active one and
+	// reads its switch, which is what the seat takeover follows
+	installDom(['session-1']);
+	await withFetch(() => ({ ok: true, json: async () => initFrame(true) }), async () => {
 		client.apply(harness.ctx);
 		await settle();
 	});
@@ -229,7 +268,7 @@ test('the client half registers every surface it owns', async () => {
 	assert.equal(optionsOf(harness.registrations, 'conversation.input.right').length, 1, 'composer switch');
 	assert.equal(optionsOf(harness.registrations, 'conversation.composer.dock').length, 1, 'routing detail');
 	assert.equal(optionsOf(harness.registrations, 'settings.section').length, 1, 'settings page');
-	assert.equal(optionsOf(harness.registrations, 'conversation.input.model').length, 1, 'model seat, because the router is on');
+	assert.equal(optionsOf(harness.registrations, 'conversation.input.model').length, 1, 'model seat, because this conversation has the router on');
 
 	const [command] = harness.commands;
 	assert.equal(command.id, 'dual-model-router.toggle');
@@ -297,14 +336,15 @@ test('the settings page loads, edits and saves the extra instructions', async ()
 	harness.dispose();
 });
 
-test('the model seat is only taken over while the router is on', async () => {
+test('the model seat follows the conversation that is active, not the profile default', async () => {
 	const client = loadClient();
 
-	// switch ON: the seat entry is installed once the state is known
+	// a conversation with the router ON takes the seat over
 	const onHarness = fakeContext();
+	installDom(['session-1']);
 	await withFetch((url) => {
-		if (url.includes('/toggle')) return { ok: true, status: 200, json: async () => ({ ok: true, enabled: false }) };
-		return { ok: true, json: async () => ({ enabled: true }) };
+		if (url.includes('/toggle')) return { ok: true, status: 200, json: async () => ({ ok: true, enabled: false, sessionId: 'session-1' }) };
+		return { ok: true, json: async () => initFrame(true) };
 	}, async () => {
 		client.apply(onHarness.ctx);
 		await settle();
@@ -315,17 +355,19 @@ test('the model seat is only taken over while the router is on', async () => {
 		'the seat registers below the shipped selector (priority 0) to shadow it',
 	);
 
-	// the shortcut flips it off and the seat is released again
+	// the shortcut flips that conversation off and the seat is released again
 	const [command] = onHarness.commands;
-	await withFetch(() => ({ ok: true, status: 200, json: async () => ({ ok: true, enabled: false }) }), async () => {
+	await withFetch(() => ({ ok: true, status: 200, json: async () => ({ ok: true, enabled: false, sessionId: 'session-1' }) }), async () => {
 		command.resolve({ region: 'editable', modal: null }).run();
 		await settle();
 	});
 	assert.equal(optionsOf(onHarness.registrations, 'conversation.input.model').length, 0, 'shipped selector restored');
 
-	// switch OFF at boot: the shipped selector is never shadowed
+	// a conversation whose own switch is off never shadows the shipped selector,
+	// whatever the profile default says
 	const offHarness = fakeContext();
-	await withFetch(() => ({ ok: true, json: async () => ({ enabled: false }) }), async () => {
+	installDom(['session-1']);
+	await withFetch(() => ({ ok: true, json: async () => initFrame(false) }), async () => {
 		client.apply(offHarness.ctx);
 		await settle();
 	});
@@ -336,7 +378,8 @@ test('the seat is still installed when the declaration watch never fires', async
 	const client = loadClient();
 	// the slot exists, but this plugin's `slots.inject` callback never runs
 	const harness = fakeContext({ watchFires: false });
-	await withFetch(() => ({ ok: true, json: async () => ({ enabled: true }) }), async () => {
+	installDom(['session-1']);
+	await withFetch(() => ({ ok: true, json: async () => initFrame(true) }), async () => {
 		client.apply(harness.ctx);
 		await settle();
 	});
@@ -352,7 +395,8 @@ test('the seat is still installed when the declaration watch never fires', async
 test('an unreachable seat reports the anomaly through an invisible sentinel', async () => {
 	const client = loadClient();
 	const harness = fakeContext({ watchFires: false, declared: [] });
-	await withFetch(() => ({ ok: true, json: async () => ({ enabled: true }) }), async () => {
+	installDom(['session-1']);
+	await withFetch(() => ({ ok: true, json: async () => initFrame(true) }), async () => {
 		client.apply(harness.ctx);
 		await settle();
 	});
@@ -371,7 +415,8 @@ test('an unreachable seat reports the anomaly through an invisible sentinel', as
 test('a refused toggle leaves the state and the seat alone', async () => {
 	const client = loadClient();
 	const harness = fakeContext();
-	await withFetch(() => ({ ok: true, json: async () => ({ enabled: false }) }), async () => {
+	installDom(['session-1']);
+	await withFetch(() => ({ ok: true, json: async () => initFrame(false) }), async () => {
 		client.apply(harness.ctx);
 		await settle();
 	});
@@ -428,7 +473,9 @@ function fakeConversation(order) {
 			return { ok: true };
 		},
 		scopeId() {
-			return 'session-scoped';
+			// the conversation a `send()` belongs to, exactly like the shipped
+			// service answers it: the same id the DOM container carries
+			return 'session-1';
 		},
 	};
 	return { service: Object.create(prototype), log };
@@ -443,6 +490,8 @@ async function routedHarness({ enabled = true, routeResponse, offline = false, o
 	const client = loadClient();
 	const conversation = fakeConversation(order);
 	const harness = fakeContext({ conversation: conversation.service });
+	// the conversation is on screen: its switch is what gates the round trip
+	installDom(['session-1']);
 	const fetches = [];
 	const real = globalThis.fetch;
 	globalThis.fetch = async (url, options) => {
@@ -453,7 +502,7 @@ async function routedHarness({ enabled = true, routeResponse, offline = false, o
 			if (offline) throw new Error('offline');
 			return routeResponse ?? { ok: true, json: async () => ({ ok: true, applied: true, kind: 'auto' }) };
 		}
-		return { ok: true, json: async () => ({ enabled }) };
+		return { ok: true, json: async () => initFrame(enabled) };
 	};
 	const dispose = harness.dispose;
 	harness.dispose = () => {
@@ -495,7 +544,7 @@ test('the plain send API is routed too, and both wrappers come off on unload', a
 	const routed = await routedHarness();
 	await routed.conversation.service.send('quick question');
 	assert.equal(routed.routes.length, 1);
-	assert.deepEqual(JSON.parse(routed.routes[0].options.body), { sessionId: 'session-scoped', text: 'quick question' });
+	assert.deepEqual(JSON.parse(routed.routes[0].options.body), { sessionId: 'session-1', text: 'quick question' });
 
 	routed.harness.dispose();
 	const service = routed.conversation.service;
@@ -859,6 +908,85 @@ test('the routing dot is tinted by the auto mode, not the neutral fallback', asy
 		assert.equal(hooks.render(dock.component, { sessionId: 'session-1' }), null);
 	} finally {
 		globalThis.EventSource = realEventSource;
+		harness.dispose();
+	}
+});
+
+// ---------- per-conversation switch ----------
+
+test('the pill flips only the conversation it sits in', async () => {
+	const client = loadClient();
+	const harness = fakeContext();
+	installDom(['session-1']);
+	const toggles = [];
+	await withFetch((url, options) => {
+		if (url.includes('/toggle')) {
+			toggles.push(JSON.parse(options.body));
+			return { ok: true, status: 200, json: async () => ({ ok: true, enabled: true, sessionId: 'session-1' }) };
+		}
+		return { ok: true, json: async () => initFrame(false) };
+	}, async () => {
+		client.apply(harness.ctx);
+		await settle();
+	});
+
+	const [command] = harness.commands;
+	await withFetch((url, options) => {
+		if (url.includes('/toggle')) {
+			toggles.push(JSON.parse(options.body));
+			return { ok: true, status: 200, json: async () => ({ ok: true, enabled: true, sessionId: 'session-1' }) };
+		}
+		return { ok: true, json: async () => initFrame(false) };
+	}, async () => {
+		command.resolve({ region: 'editable', modal: null }).run();
+		await settle();
+	});
+
+	// the desired state travels with the request: the host never has to infer it
+	// from a surface that may be a frame behind
+	assert.deepEqual(toggles, [{ enabled: true, sessionId: 'session-1' }], 'the flip names its conversation');
+	harness.dispose();
+});
+
+test('the model seat follows focus between two conversations', async () => {
+	const client = loadClient();
+	const harness = fakeContext();
+	// two conversations on screen: neither is elected until one is focused
+	const dom = installDom(['session-on', 'session-off']);
+	const streams = [];
+	const real = globalThis.EventSource;
+	globalThis.EventSource = class {
+		constructor(url) {
+			this.url = String(url);
+			streams.push(this);
+		}
+		close() {}
+	};
+	try {
+		// the state read the plugin makes when a conversation is elected happens
+		// long after `apply` returned, so the stub stays installed for the test
+		const realFetch = globalThis.fetch;
+		globalThis.fetch = async (url) => (String(url).includes('session=session-on')
+			? { ok: true, json: async () => ({ type: 'init', enabled: true, defaultEnabled: false }) }
+			: { ok: true, json: async () => ({ type: 'init', enabled: false, defaultEnabled: false }) });
+		client.apply(harness.ctx);
+		await settle();
+		assert.equal(optionsOf(harness.registrations, 'conversation.input.model').length, 0, 'no election, no takeover');
+
+		dom.focus('session-on');
+		await settle();
+		assert.equal(optionsOf(harness.registrations, 'conversation.input.model').length, 1, 'the conversation with the router on takes the seat');
+
+		dom.focus('session-off');
+		await settle();
+		assert.equal(
+			optionsOf(harness.registrations, 'conversation.input.model').length,
+			0,
+			'the shipped selector comes back for the conversation that has it off',
+		);
+		globalThis.fetch = realFetch;
+	} finally {
+		globalThis.EventSource = real;
 		harness.dispose();
 	}
 });

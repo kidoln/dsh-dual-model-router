@@ -12,6 +12,9 @@
 //   4. the /api routes live in a child fiber that waits for `webServer`, which
 //      is a service that activates after this plugin applies and is absent in
 //      headless profiles.
+//   5. the ON/OFF switch is per session rather than global: the row's `enabled`
+//      is only the default, a hand-flipped session keeps its choice across a
+//      plugin reload, and subagents follow the session that dispatched them.
 // The fake harness models the cordis semantics the plugin relies on:
 // waterfall = outermost-first with a shifting `next`, `prepend` unshifts,
 // agent-scoped hooks rank outside root-scoped ones, and a duplicate
@@ -19,8 +22,18 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { apply } from '../index.js';
 import { isHumanPrompt } from '../lib/routing.js';
+
+/**
+ * The per-session switches are real durable state under the DSH home, so the
+ * tests point them at a throwaway file: a test run must never read or rewrite
+ * the switches of the machine it runs on.
+ */
+process.env.DSH_DUAL_MODEL_ROUTER_STATE = join(tmpdir(), `dsh-dual-model-router-test-${process.pid}.json`);
 
 /**
  * dsh-system-prompt's section interpolation, reduced to what this plugin uses:
@@ -1434,4 +1447,188 @@ test('a config change re-judges a text classified under the old rules', async ()
 	await harness.preStep(agent, [userMessage('m2', 'tidy up the repo')]);
 	assert.deepEqual(harness.routes(agent), [['fast-p', 'fast-m'], ['strong-p', 'strong-m']]);
 	assert.equal(harness.llmCalls.length, 1, 'the keyword path costs no model call');
+});
+
+// ---------- per-session switch (the row is only the default) ----------
+
+/**
+ * One apply whose webServer, connection and agent registry are all reachable, so
+ * a test can drive the toggle endpoint AND pre-step routing against the SAME
+ * plugin instance — the switches live in the plugin, not in the config row.
+ * @param config - the applied config; `enabled` is the default for sessions that
+ *   were never switched by hand.
+ * @param sessionIds - sessions to create up front, addressable by their real id.
+ */
+function switchHarness({ config = CONFIG, sessionIds = [] } = {}) {
+	const harness = new Harness();
+	const webServer = fakeWebServer();
+	const agents = new Map();
+	const services = {
+		webServer,
+		connection: { requestRejection: () => undefined, admit: () => ({ peer: { principal: { kind: 'owner' } } }) },
+		agents: registryOf(agents),
+	};
+	const ctxOf = () => harness.ctx({ get: (name) => services[name] });
+	apply(ctxOf(), config);
+	const byId = new Map();
+	for (const sessionId of sessionIds) {
+		// the harness prefixes ids so tests cannot bleed into each other's
+		// module-scoped state; these tests WANT the real session id, because the
+		// switch is keyed by it
+		const agent = harness.agent({ session: { header: {} } });
+		agent.id = sessionId;
+		byId.set(sessionId, agent);
+		agents.set(sessionId, agent);
+	}
+	return {
+		harness,
+		webServer,
+		agents,
+		agent: (sessionId) => byId.get(sessionId),
+		reapply: (next = config) => {
+			harness.disposeApply();
+			apply(ctxOf(), next);
+		},
+	};
+}
+
+/** POST one body to the toggle endpoint and return the parsed reply. */
+async function toggle(webServer, body) {
+	const res = fakeRes();
+	await route(webServer, TOGGLE).handler(
+		fakeReq({ method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+		res,
+	);
+	return { status: res.status, body: res.body === undefined ? undefined : JSON.parse(res.body) };
+}
+
+test('toggling one conversation leaves the profile row alone', async () => {
+	const { webServer, editor } = endpointHarness({
+		connection: { requestRejection: () => undefined },
+		rowConfig: CONFIGURED_ROW,
+	});
+	const on = await toggle(webServer, { sessionId: 'switch-row-1', enabled: true });
+	assert.equal(on.status, 200, on.body);
+	assert.deepEqual(on.body, { ok: true, enabled: true, sessionId: 'switch-row-1' });
+	assert.equal(editor.edited, 0, 'a per-conversation flip must not rewrite the profile default');
+
+	// the default is untouched, and the conversation can be flipped back
+	const off = await toggle(webServer, { sessionId: 'switch-row-1', enabled: false });
+	assert.deepEqual(off.body, { ok: true, enabled: false, sessionId: 'switch-row-1' });
+	assert.equal(editor.edited, 0);
+});
+
+test('a conversation switched on by hand routes while the profile default is off', async () => {
+	const { harness, webServer, agent } = switchHarness({
+		config: { ...CONFIG, enabled: false },
+		sessionIds: ['switch-on-2'],
+	});
+	harness.nextVerdict = '{"difficulty":"simple"}';
+	const session = agent('switch-on-2');
+
+	// the default is off and this conversation was never flipped: nothing routes
+	await harness.preStep(session, [userMessage('m1', 'rename this function')]);
+	assert.deepEqual(harness.routes(session), []);
+
+	const flipped = await toggle(webServer, { sessionId: 'switch-on-2', enabled: true });
+	assert.equal(flipped.status, 200, flipped.body);
+
+	await harness.preStep(session, [userMessage('m2', 'rename that function too')]);
+	assert.deepEqual(harness.routes(session), [['fast-p', 'fast-m']], 'its own switch wins over the default');
+});
+
+test('a conversation switched off keeps its own choice while others follow the default', async () => {
+	const { harness, webServer, agent } = switchHarness({ config: CONFIG, sessionIds: ['switch-off-3', 'switch-default-3'] });
+	harness.nextVerdict = '{"difficulty":"simple"}';
+
+	const flipped = await toggle(webServer, { sessionId: 'switch-off-3', enabled: false });
+	assert.equal(flipped.status, 200, flipped.body);
+
+	await harness.preStep(agent('switch-off-3'), [userMessage('m1', 'rename this function')]);
+	assert.deepEqual(harness.routes(agent('switch-off-3')), [], 'this conversation is off');
+	await harness.preStep(agent('switch-default-3'), [userMessage('m2', 'rename that function')]);
+	assert.deepEqual(
+		harness.routes(agent('switch-default-3')),
+		[['fast-p', 'fast-m']],
+		'a conversation the user never touched still follows the profile default',
+	);
+});
+
+test('a hand-flipped switch survives a plugin reload and is written to disk', async () => {
+	const { harness, webServer, agent, reapply } = switchHarness({
+		config: { ...CONFIG, enabled: false },
+		sessionIds: ['switch-persist-4'],
+	});
+	harness.nextVerdict = '{"difficulty":"simple"}';
+	const session = agent('switch-persist-4');
+	assert.equal((await toggle(webServer, { sessionId: 'switch-persist-4', enabled: true })).status, 200);
+
+	// a Settings save re-applies the plugin; the flip must survive it
+	reapply({ ...CONFIG, enabled: false });
+	await harness.preStep(session, [userMessage('m1', 'rename this function')]);
+	assert.deepEqual(harness.routes(session), [['fast-p', 'fast-m']], 'the reload inherited the session switch');
+
+	// and the choice is durable, not merely in memory
+	const saved = JSON.parse(readFileSync(process.env.DSH_DUAL_MODEL_ROUTER_STATE, 'utf8'));
+	assert.equal(saved.version, 1);
+	assert.equal(saved.sessions['switch-persist-4'].enabled, true);
+});
+
+test('a subagent follows the switch of the conversation that dispatched it', async () => {
+	const { harness, webServer, agents, agent } = switchHarness({
+		config: { ...CONFIG, enabled: false },
+		sessionIds: ['switch-root-5'],
+	});
+	harness.nextVerdict = '{"difficulty":"simple"}';
+	// a child of that conversation: it has no composer and no switch of its own
+	const child = harness.agent({ session: { header: { origin: 'subagent', parentSession: 'switch-root-5' } } });
+	child.id = 'switch-child-5';
+	agents.set('switch-child-5', child);
+
+	await harness.preStep(child, [userMessage('m1', 'do the work')]);
+	assert.deepEqual(harness.routes(child), [], 'the parent conversation is off');
+
+	assert.equal((await toggle(webServer, { sessionId: 'switch-root-5', enabled: true })).status, 200);
+	await harness.preStep(child, [userMessage('m2', 'do the work')]);
+	assert.deepEqual(harness.routes(child), [['fast-p', 'fast-m']], 'the executor runs on the cheap model');
+	assert.equal(harness.llmCalls.length, 0, 'a subagent is never classified');
+	await harness.preStep(agent('switch-root-5'), [userMessage('m3', 'do the work')]);
+	assert.deepEqual(harness.routes(agent('switch-root-5')), [['fast-p', 'fast-m']], 'the root is routed too');
+});
+
+test('the status frame carries the conversation switch and the profile default', async () => {
+	const { webServer } = switchHarness({ config: { ...CONFIG, enabled: false }, sessionIds: ['switch-frame-6'] });
+	assert.equal((await toggle(webServer, { sessionId: 'switch-frame-6', enabled: true })).status, 200);
+
+	const scoped = fakeRes();
+	await route(webServer, '/api/dual-model-router/status').handler(
+		fakeReq({ url: '/api/dual-model-router/status?session=switch-frame-6' }),
+		scoped,
+	);
+	const scopedBody = JSON.parse(scoped.body);
+	assert.equal(scopedBody.enabled, true, 'the frame reports what THIS conversation does');
+	assert.equal(scopedBody.defaultEnabled, false, 'the profile default is reported separately');
+
+	const plain = fakeRes();
+	await route(webServer, '/api/dual-model-router/status').handler(fakeReq(), plain);
+	assert.equal(JSON.parse(plain.body).enabled, false, 'a request without a conversation sees the default');
+});
+
+test('the prompt-time route honors the conversation switch', async () => {
+	const { harness, webServer, agent, agents } = switchHarness({
+		config: { ...CONFIG, enabled: false },
+		sessionIds: ['switch-route-7'],
+	});
+	harness.nextVerdict = '{"difficulty":"complex"}';
+	const session = agent('switch-route-7');
+	agents.set('switch-route-7', session);
+
+	const off = await routeNow(webServer, { sessionId: 'switch-route-7', text: 'deep work' });
+	assert.equal(off.body.kind, 'off', 'a conversation with the router off spends no model call');
+	assert.equal(harness.llmCalls.length, 0);
+
+	assert.equal((await toggle(webServer, { sessionId: 'switch-route-7', enabled: true })).status, 200);
+	const on = await routeNow(webServer, { sessionId: 'switch-route-7', text: 'deep work' });
+	assert.equal(on.body.kind, 'auto');
+	assert.deepEqual(harness.routes(session), [['strong-p', 'strong-m']]);
 });

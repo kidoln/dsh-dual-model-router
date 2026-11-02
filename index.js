@@ -1,6 +1,6 @@
 // dsh-dual-model-router — dual-model auto routing for DeepSeek Harness.
 //
-// Flow (when enabled):
+// Flow (per conversation, while its switch is ON):
 //   1. prompt time  — the browser half holds a send and asks
 //      POST /api/dual-model-router/route to decide and record the route before
 //      the prompt is admitted, so even the FIRST step of the turn runs on it.
@@ -26,11 +26,20 @@
 //      execution step to subagents, followed by the user's own additional
 //      instructions (`extraPrompt`, the settings page's free-text box).
 //
+// The switch is PER CONVERSATION. The row's `enabled` is only the default a
+// session follows until the user flips that conversation's own switch from the
+// composer pill; from then on the session's choice lives in this package's
+// durable state (see `sessionSwitches`) and the row no longer decides for it.
+// A subagent follows the switch of the session it was dispatched from, since
+// the pill belongs to the root conversation.
+//
 // The settings save path goes through ctx.configEditor, which hot-applies the
 // change; this package deliberately declares no Loader Config schema so it
 // stays dependency-free (the profile links it from outside its node_modules,
 // where @deepseek-ai/* imports would not resolve). resolveConfig below
-// validates the untrusted row config by hand instead.
+// validates the untrusted row config by hand instead, and the per-session
+// switches are read and written with node:fs rather than through a storage
+// service for the same reason.
 //
 // The six /api routes are exact paths, which shadow the /api auth prefix, so
 // each one authenticates itself through the `connection` service. The four that
@@ -39,6 +48,10 @@
 // remote caller rewrite the profile config or pin another session's model,
 // because these handlers run outside any Remote invocation and therefore
 // bypass `remoteAccess`'s policy.
+
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 
 import { classifyTaskText, resetClassifierCaches } from './lib/classifier.js';
 import { isHumanPrompt, keywordHit, pickTarget, sameRoute, userTextOf } from './lib/routing.js';
@@ -59,6 +72,14 @@ const SECTION_ORDER = 800;
 const EXTRA_SECTION_ORDER = SECTION_ORDER + 1;
 /** Longest user-authored instruction block the settings page may inject. */
 const EXTRA_PROMPT_LIMIT = 8000;
+/** On-disk shape of the per-session switch file; an unknown version is ignored. */
+const SESSION_STATE_VERSION = 1;
+/**
+ * Per-session switches kept on disk. Beyond this the oldest are dropped: the
+ * bound exists so an abandoned session id cannot grow the file forever, not as
+ * an eviction policy any live session is expected to hit.
+ */
+const SESSION_STATE_LIMIT = 500;
 /**
  * Recent human/assistant entries read from a session for classification. The
  * classifier itself keeps a smaller, character-bounded subset; collecting a
@@ -151,6 +172,131 @@ function guidanceText(aux) {
  */
 const sessionStates = new Map();
 
+/**
+ * The per-session ON/OFF switch: which sessions were switched by hand, and to
+ * what. A session absent from this map follows the profile row's `enabled`
+ * (the default for every session the user never touched).
+ *
+ * Module-scoped for the same reason `sessionStates` is — a Settings save
+ * re-applies this plugin against sessions that are still live, and each
+ * session's own switch must survive that reload — and mirrored to
+ * `<DSH_HOME>/dual-model-router/sessions.json` so it also survives a host
+ * restart. Entries are never dropped when an agent is disposed: the switch
+ * belongs to the session id, and a session can be reopened after its agent is
+ * gone. Only the size bound in `saveSwitches` prunes records.
+ */
+const sessionSwitches = {
+	loaded: false,
+	file: '',
+	/** sessionId -> { enabled: boolean, at: number } */
+	entries: new Map(),
+};
+
+/**
+ * Where the switches live. `DSH_DUAL_MODEL_ROUTER_STATE` is an explicit escape
+ * hatch (tests, throwaway hosts); otherwise the harness home decides, and a
+ * missing `DSH_HOME` falls back to the same `~/.dsh` the harness itself uses.
+ */
+function switchesFile() {
+	const override = String(process.env.DSH_DUAL_MODEL_ROUTER_STATE ?? '').trim();
+	if (override.length > 0) return override;
+	const home = String(process.env.DSH_HOME ?? '').trim();
+	const root = home.length > 0 ? home : join(homedir(), '.dsh');
+	return join(root, 'dual-model-router', 'sessions.json');
+}
+
+/** Read the switch file once per process; an unreadable file means "no overrides". */
+function loadSwitches() {
+	if (sessionSwitches.loaded) return sessionSwitches.entries;
+	sessionSwitches.loaded = true;
+	sessionSwitches.file = switchesFile();
+	try {
+		const raw = JSON.parse(readFileSync(sessionSwitches.file, 'utf8'));
+		if (raw?.version !== SESSION_STATE_VERSION) return sessionSwitches.entries;
+		for (const [sessionId, record] of Object.entries(raw.sessions ?? {})) {
+			if (typeof record?.enabled !== 'boolean') continue;
+			sessionSwitches.entries.set(sessionId, {
+				enabled: record.enabled,
+				at: Number.isFinite(record.at) ? Math.trunc(record.at) : 0,
+			});
+		}
+	} catch {
+		// absent, unreadable or written by another version: every session simply
+		// follows the profile default until the user flips one
+	}
+	return sessionSwitches.entries;
+}
+
+/**
+ * One switch's value, or undefined when this session follows the default.
+ * @param sessionId - a session id; an absent id has no switch of its own.
+ */
+function switchOf(sessionId) {
+	if (sessionId === undefined || sessionId === null || String(sessionId).length === 0) return undefined;
+	return loadSwitches().get(String(sessionId))?.enabled;
+}
+
+/** Mirror the in-memory switches to disk; a failed write never breaks a toggle. */
+function saveSwitches() {
+	const entries = loadSwitches();
+	if (entries.size > SESSION_STATE_LIMIT) {
+		const oldest = [...entries.entries()]
+			.sort((left, right) => left[1].at - right[1].at)
+			.slice(0, entries.size - SESSION_STATE_LIMIT);
+		for (const [sessionId] of oldest) entries.delete(sessionId);
+	}
+	const body = JSON.stringify({
+		version: SESSION_STATE_VERSION,
+		sessions: Object.fromEntries(entries),
+	}, null, '\t');
+	try {
+		mkdirSync(dirname(sessionSwitches.file), { recursive: true });
+		// write-then-rename: a crash mid-write must not leave a half file that the
+		// next start would read as "no overrides"
+		const temporary = `${sessionSwitches.file}.tmp`;
+		writeFileSync(temporary, body, 'utf8');
+		renameSync(temporary, sessionSwitches.file);
+	} catch {
+		// a read-only or missing home directory costs durability, not the toggle
+	}
+}
+
+/** Record one session's switch and persist it. */
+function setSwitch(sessionId, enabled) {
+	loadSwitches().set(String(sessionId), { enabled, at: Date.now() });
+	saveSwitches();
+}
+
+/**
+ * Walk a subagent up to the session the user actually drives.
+ *
+ * Subagents are the executors, so they follow the switch of the session they
+ * were dispatched from rather than one of their own — the pill the user sees
+ * belongs to the root conversation. A parent that is no longer live still
+ * answers through its own recorded switch, which is why the walk can stop at
+ * an id instead of a header.
+ * @param agents - the live agent registry, when the service is available.
+ * @param agent - the agent whose effective switch is wanted.
+ * @returns the session id whose switch decides this agent's routing.
+ */
+function switchOwnerId(agents, agent) {
+	let id = agent?.id;
+	let session = agent?.session;
+	for (let hops = 0; hops < 16; hops += 1) {
+		if (session?.header?.origin !== 'subagent') break;
+		const parentId = session.header.parentSession;
+		if (parentId === undefined || parentId === null || String(parentId) === String(id)) break;
+		const parent = agents?.get?.(parentId);
+		if (parent === undefined) {
+			id = String(parentId);
+			break;
+		}
+		id = parent.id ?? String(parentId);
+		session = parent.session;
+	}
+	return id;
+}
+
 function apply(ctx, input) {
 	const config = resolveConfig(input);
 	const appliedAt = new Date().toISOString();
@@ -174,6 +320,23 @@ function apply(ctx, input) {
 	/** Last classifier verdict per session, for diagnostics. */
 	const classifyDebug = new Map();
 
+	/**
+	 * Whether this router drives one session: its own hand-set switch when it has
+	 * one, else the profile row's `enabled`.
+	 */
+	const enabledFor = (sessionId) => {
+		const stored = switchOf(sessionId);
+		return stored === undefined ? config.enabled : stored;
+	};
+
+	/**
+	 * Whether this router drives one agent. A subagent answers for the session it
+	 * was dispatched from — it is an executor, and it has no composer switch of
+	 * its own — so the whole parent chain is walked to the conversation the user
+	 * actually sees.
+	 */
+	const enabledForAgent = (agent) => enabledFor(switchOwnerId(ctx.get?.('agents'), agent));
+
 	const sendTo = (subscriber, frame) => {
 		try {
 			subscriber.send(frame);
@@ -193,6 +356,32 @@ function apply(ctx, input) {
 	const clearStatus = (sessionId) => {
 		if (!status.delete(sessionId)) return;
 		const frame = { type: 'status', sessionId, status: null };
+		for (const subscriber of statusSubscribers) {
+			if (subscriber.sessionId === sessionId) sendTo(subscriber, frame);
+		}
+	};
+
+	/**
+	 * The frame that describes one conversation's routing state: the same one an
+	 * SSE connection receives on connect, so a surface that is already connected
+	 * sees a hand-flipped switch exactly as it sees a re-applied config.
+	 * @param sessionId - the conversation the frame describes; undefined means
+	 *   "no session", and the frame then carries the profile default.
+	 */
+	const initFrame = (sessionId) => ({
+		type: 'init',
+		enabled: enabledFor(sessionId),
+		defaultEnabled: config.enabled,
+		primary: config.primary,
+		aux: config.aux,
+		classifierTimeoutMs: config.classifierTimeoutMs,
+		status: (sessionId !== undefined ? status.get(sessionId) : undefined) ?? null,
+	});
+
+	/** Push one conversation's current state to every subscribed surface of it. */
+	const broadcastInit = (sessionId) => {
+		if (sessionId === undefined || sessionId === null || String(sessionId).length === 0) return;
+		const frame = initFrame(String(sessionId));
 		for (const subscriber of statusSubscribers) {
 			if (subscriber.sessionId === sessionId) sendTo(subscriber, frame);
 		}
@@ -258,7 +447,7 @@ function apply(ctx, input) {
 			interpolate: false,
 			text: () => {
 				const state = states.get(agent.id);
-				if (!config.enabled || !config.plannerGuidance) return '';
+				if (!enabledForAgent(agent) || !config.plannerGuidance) return '';
 				if (state === undefined || state.mode !== 'complex') return '';
 				if (isSubagent(agent)) return '';
 				if (!isConfigured(config.primary)) return '';
@@ -279,7 +468,7 @@ function apply(ctx, input) {
 			text: () => {
 				if (!extraVariableReady || config.extraPrompt.length === 0) return '';
 				const state = states.get(agent.id);
-				if (!config.enabled) return '';
+				if (!enabledForAgent(agent)) return '';
 				if (state === undefined || state.mode !== 'complex') return '';
 				if (isSubagent(agent)) return '';
 				if (!isConfigured(config.primary)) return '';
@@ -343,7 +532,7 @@ function apply(ctx, input) {
 	 *   the client that held its send for the classification.
 	 */
 	const applyRoute = (agent, state) => {
-		if (!config.enabled || !isConfigured(config.aux)) return { kind: 'off' };
+		if (!enabledForAgent(agent) || !isConfigured(config.aux)) return { kind: 'off' };
 		if (isSubagent(agent)) {
 			// subagents are the executors: they always run on the cheap model
 			selectRoute(agent, config.aux, state);
@@ -469,7 +658,11 @@ function apply(ctx, input) {
 		if (typeof ctx.systemPrompt?.variable !== 'function') return () => {};
 		const dispose = ctx.systemPrompt.variable(
 			EXTRA_VARIABLE,
-			() => (config.enabled ? config.extraPrompt : ''),
+			// Deliberately NOT gated on any one switch: the text is only ever read by
+			// the section above, whose own per-session gate decides whether it is
+			// injected — a global gate here would drop the user's instructions for a
+			// session that switched the router on by hand while the default is off.
+			() => config.extraPrompt,
 		);
 		extraVariableReady = true;
 		return () => {
@@ -512,7 +705,7 @@ function apply(ctx, input) {
 					const state = stateOf(agent);
 					if (latest !== undefined && latest.id !== state.lastMessageId) {
 						state.lastMessageId = latest.id;
-						if (config.enabled && isConfigured(config.aux) && !isSubagent(agent)) {
+						if (enabledForAgent(agent) && isConfigured(config.aux) && !isSubagent(agent)) {
 							const taskText = userTextOf(latest);
 							// an attachment-only prompt carries no task text; keep the
 							// current mode rather than forcing it back to 'simple'
@@ -704,6 +897,10 @@ function apply(ctx, input) {
 							appliedAt,
 							statusEntries: [...status.entries()].map(([sessionId, value]) => ({ sessionId, ...value })),
 							classifier: [...classifyDebug.entries()].map(([sessionId, value]) => ({ sessionId, ...value })),
+							// every conversation switched by hand; the rest follow `config.enabled`
+							// and are absent here by design
+							switches: [...loadSwitches().entries()].map(([sessionId, value]) => ({ sessionId, ...value })),
+							defaultEnabled: config.enabled,
 						},
 						config,
 						providers: await providersCatalog(),
@@ -811,28 +1008,63 @@ function apply(ctx, input) {
 				},
 			});
 
-			// One-tap flip used by the composer pill and the keyboard shortcut: the
-			// row is the source of truth, so two clients cannot drift apart, and
-			// enabling refuses a half-configured router (the settings page does the
-			// same before its Save button) or one whose models do not resolve.
+			// One-tap flip used by the composer pill and the keyboard shortcut.
+			//
+			// With a `sessionId` the flip belongs to THAT conversation alone: the
+			// per-session switch is written to this plugin's own durable state, never
+			// to the profile row, so two conversations can no longer drag each other
+			// on and off. Without one it falls back to the profile row's `enabled`,
+			// which is the default every untouched session follows.
+			//
+			// Enabling refuses a half-configured router (the settings page does the
+			// same before its Save button) or one whose models do not resolve, since a
+			// typo would otherwise only surface as every later step failing to prepare.
 			const toggleRoute = webServer.register({
 				kind: 'exact',
 				path: '/api/dual-model-router/toggle',
 				handler: async (req, res) => {
-					// a profile write: the owner only
+					// this pins a session's model or rewrites the default: the owner only
 					if (rejectionOf(req, res, { owner: true })) return;
 					if (req.method !== 'POST') {
 						json(res, 405, { ok: false, error: 'POST required' });
 						return;
 					}
 					try {
+						// An empty body is legal here: the endpoint's whole meaning is "flip",
+						// and a caller that only wants the opposite state has nothing to say.
+						const raw = (await readBody(req)).trim();
+						const body = raw.length === 0 ? {} : JSON.parse(raw);
+						const sessionId = String(body?.sessionId ?? '');
+						if (sessionId.length > 0) {
+							// a session's own switch needs no config row at all
+							const current = enabledFor(sessionId);
+							const enabled = typeof body?.enabled === 'boolean' ? body.enabled : !current;
+							if (enabled) {
+								if (!isConfigured(config.primary) || !isConfigured(config.aux)) {
+									json(res, 409, { ok: false, error: 'configure both models before enabling the router' });
+									return;
+								}
+								const unavailable = await unresolvableRoute(config);
+								if (unavailable !== undefined) {
+									json(res, 409, { ok: false, error: `unknown model — ${unavailable}` });
+									return;
+								}
+							}
+							setSwitch(sessionId, enabled);
+							// every surface of this conversation follows the switch, including
+							// another browser tab: push the new state instead of waiting for a
+							// reconnect that a per-session flip never triggers
+							broadcastInit(sessionId);
+							json(res, 200, { ok: true, enabled, sessionId });
+							return;
+						}
 						const row = configRow();
 						if (row === undefined) {
 							json(res, 500, { ok: false, error: 'config editor unavailable' });
 							return;
 						}
 						const current = rowConfigOf(row.editor);
-						const enabled = current?.enabled !== true;
+						const enabled = typeof body?.enabled === 'boolean' ? body.enabled : current?.enabled !== true;
 						if (enabled) {
 							const candidate = resolveConfig({ ...current, enabled: true });
 							if (!isConfigured(candidate.primary) || !isConfigured(candidate.aux)) {
@@ -859,16 +1091,10 @@ function apply(ctx, input) {
 				handler: async (req, res) => {
 					if (rejectionOf(req, res)) return;
 					const session = new URL(req.url ?? '/', 'http://localhost').searchParams.get('session') ?? undefined;
-					const snapshot = () => ({
-						type: 'init',
-						enabled: config.enabled,
-						primary: config.primary,
-						aux: config.aux,
-						// how long this host is willing to spend classifying: the composer
-						// holds a send for at most as long, so both sides share one knob
-						classifierTimeoutMs: config.classifierTimeoutMs,
-						status: (session !== undefined ? status.get(session) : undefined) ?? null,
-					});
+					// the switch that applies to THIS conversation: its own override when it
+					// has one, else the profile default (`defaultEnabled`, which is also what
+					// a request without a session — the settings surfaces — sees)
+					const snapshot = () => initFrame(session);
 					if (!String(req.headers.accept ?? '').includes('text/event-stream')) {
 						json(res, 200, snapshot());
 						return;
@@ -956,7 +1182,8 @@ function apply(ctx, input) {
 						const text = String(body?.text ?? '');
 						if (sessionId.length === 0) throw new Error('sessionId is required');
 						const agent = ctx.get?.('agents')?.get?.(sessionId);
-						if (!config.enabled || !isConfigured(config.aux)) {
+						// this conversation's own switch decides, not the profile default
+						if (!enabledFor(sessionId) || !isConfigured(config.aux)) {
 							json(res, 200, { ok: true, applied: false, kind: 'off' });
 							return;
 						}
